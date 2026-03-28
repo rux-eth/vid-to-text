@@ -130,23 +130,27 @@ impl OllamaClient {
     }
 
     /// Describe the visual content of a chunk's frames.
+    /// If a transcript is provided, it is included in the prompt so the vision
+    /// model can relate visual content to what was said/heard.
     /// Returns a single Visual segment spanning the chunk's time range.
     pub async fn describe_chunk(
         &self,
         chunk: &Chunk,
         frame_paths: &[PathBuf],
+        transcript: Option<&str>,
     ) -> Result<Vec<Segment>, VttError> {
         if frame_paths.is_empty() {
             return Ok(Vec::new());
         }
 
+        let prompt = build_prompt(&self.prompt_template, transcript);
         let encoded = encode_frames_base64(frame_paths).await?;
 
         let mut descriptions = Vec::new();
         for batch in encoded.chunks(self.max_frames_per_request as usize) {
             let request = build_chat_request(
                 &self.model,
-                &self.prompt_template,
+                &prompt,
                 batch.to_vec(),
                 self.max_tokens,
             );
@@ -194,6 +198,20 @@ fn load_prompt_template(path: &Option<String>) -> Result<String, VttError> {
         Some(p) if !p.is_empty() => std::fs::read_to_string(p)
             .map_err(|e| VttError::Vision(format!("failed to read prompt template '{p}': {e}"))),
         _ => Ok(DEFAULT_PROMPT_TEMPLATE.to_string()),
+    }
+}
+
+/// Build the full prompt by combining the template with an optional transcript.
+fn build_prompt(template: &str, transcript: Option<&str>) -> String {
+    match transcript {
+        Some(t) if !t.trim().is_empty() => {
+            format!(
+                "{template}\n\nAudio transcript for this segment:\n\"{t}\"\n\n\
+                 Use this transcript as context to enrich your visual description. \
+                 Note how the visual content relates to what is being said or heard."
+            )
+        }
+        _ => template.to_string(),
     }
 }
 
@@ -429,6 +447,28 @@ mod tests {
         assert_eq!(end, "00:06:00.000");
     }
 
+    // --- build_prompt tests ---
+
+    #[test]
+    fn test_build_prompt_without_transcript() {
+        let result = build_prompt("Describe the scene.", None);
+        assert_eq!(result, "Describe the scene.");
+    }
+
+    #[test]
+    fn test_build_prompt_with_transcript() {
+        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."));
+        assert!(result.contains("Describe the scene."));
+        assert!(result.contains("Hello, welcome to the show."));
+        assert!(result.contains("Audio transcript"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_empty_transcript() {
+        let result = build_prompt("Describe the scene.", Some("   "));
+        assert_eq!(result, "Describe the scene.");
+    }
+
     // --- Integration tests (require Ollama running with qwen3-vl:8b) ---
 
     #[tokio::test]
@@ -460,7 +500,7 @@ mod tests {
             end_seconds: 3.0,
         };
 
-        let segments = client.describe_chunk(&chunk, &[frame_path]).await.unwrap();
+        let segments = client.describe_chunk(&chunk, &[frame_path], None).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());
