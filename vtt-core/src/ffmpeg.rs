@@ -427,6 +427,7 @@ mod tests {
         let vision = VisionConfig {
             fps: 2.0,
             max_tokens: 4096,
+            max_frames_per_request: 360,
         };
         let chunk = Chunk {
             index: 0,
@@ -461,6 +462,7 @@ mod tests {
         let vision = VisionConfig {
             fps: 1.0,
             max_tokens: 4096,
+            max_frames_per_request: 360,
         };
         let chunk = Chunk {
             index: 0,
@@ -565,6 +567,7 @@ mod tests {
         let vision = VisionConfig {
             fps: 2.0,
             max_tokens: 4096,
+            max_frames_per_request: 360,
         };
         let dir = tempfile::tempdir().unwrap();
         let video_path = dir.path().join("test.mp4");

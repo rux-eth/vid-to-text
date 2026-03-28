@@ -22,3 +22,5 @@ dirs = "6"
 tempfile = "3"
 whisper-rs = "0.16"
 hound = "3.5"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+base64 = "0.22"
