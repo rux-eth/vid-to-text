@@ -90,6 +90,8 @@ pub struct ServerListenConfig {
 pub struct FfmpegConfig {
     pub path: String,
     pub chunk_duration_secs: u32,
+    pub frame_format: String,
+    pub frame_quality: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,6 +150,21 @@ impl Default for FfmpegConfig {
         Self {
             path: "ffmpeg".to_string(),
             chunk_duration_secs: 180,
+            frame_format: "jpg".to_string(),
+            frame_quality: 2,
+        }
+    }
+}
+
+impl FfmpegConfig {
+    /// Derive the ffprobe binary path from the ffmpeg path.
+    pub fn ffprobe_path(&self) -> String {
+        let path = std::path::Path::new(&self.path);
+        match path.parent() {
+            Some(dir) if dir != std::path::Path::new("") => {
+                dir.join("ffprobe").display().to_string()
+            }
+            _ => "ffprobe".to_string(),
         }
     }
 }
@@ -207,6 +224,16 @@ impl ServerConfig {
         if self.ffmpeg.chunk_duration_secs == 0 {
             return Err(VttError::Config(
                 "ffmpeg.chunk_duration_secs must be greater than 0".into(),
+            ));
+        }
+        if self.ffmpeg.frame_format != "jpg" && self.ffmpeg.frame_format != "png" {
+            return Err(VttError::Config(
+                "ffmpeg.frame_format must be \"jpg\" or \"png\"".into(),
+            ));
+        }
+        if self.ffmpeg.frame_quality == 0 || self.ffmpeg.frame_quality > 31 {
+            return Err(VttError::Config(
+                "ffmpeg.frame_quality must be between 1 and 31".into(),
             ));
         }
         if self.whisper.model_path.is_empty() {
@@ -412,6 +439,8 @@ listen_port = 8080
 [ffmpeg]
 path = "/usr/local/bin/ffmpeg"
 chunk_duration_secs = 120
+frame_format = "png"
+frame_quality = 5
 
 [whisper]
 model_path = "/models/whisper.bin"
@@ -435,6 +464,8 @@ temp_dir = "/var/tmp/vtt"
         assert_eq!(config.server.listen_port, 8080);
         assert_eq!(config.ffmpeg.path, "/usr/local/bin/ffmpeg");
         assert_eq!(config.ffmpeg.chunk_duration_secs, 120);
+        assert_eq!(config.ffmpeg.frame_format, "png");
+        assert_eq!(config.ffmpeg.frame_quality, 5);
         assert_eq!(config.whisper.model_path, "/models/whisper.bin");
         assert_eq!(config.whisper.model_size, "medium");
         assert_eq!(config.whisper.language, "ja");
@@ -546,5 +577,39 @@ listen_port = "not a number"
     fn test_server_bind_address() {
         let config = ServerConfig::default();
         assert_eq!(config.bind_address(), "0.0.0.0:3000");
+    }
+
+    #[test]
+    fn test_ffprobe_path_from_bare_ffmpeg() {
+        let config = FfmpegConfig::default();
+        assert_eq!(config.ffprobe_path(), "ffprobe");
+    }
+
+    #[test]
+    fn test_ffprobe_path_from_absolute_path() {
+        let mut config = FfmpegConfig::default();
+        config.path = "/usr/local/bin/ffmpeg".to_string();
+        assert_eq!(config.ffprobe_path(), "/usr/local/bin/ffprobe");
+    }
+
+    #[test]
+    fn test_server_validation_rejects_invalid_frame_format() {
+        let mut config = ServerConfig::default();
+        config.ffmpeg.frame_format = "gif".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_frame_quality() {
+        let mut config = ServerConfig::default();
+        config.ffmpeg.frame_quality = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_high_frame_quality() {
+        let mut config = ServerConfig::default();
+        config.ffmpeg.frame_quality = 32;
+        assert!(config.validate().is_err());
     }
 }
