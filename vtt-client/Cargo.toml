@@ -1,0 +1,10 @@
+[package]
+name = "vtt-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vtt-core = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }

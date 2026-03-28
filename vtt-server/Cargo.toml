@@ -1,0 +1,11 @@
+[package]
+name = "vtt-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vtt-core = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }

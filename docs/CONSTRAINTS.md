@@ -36,10 +36,22 @@ All configurable values come from config files. Zero hardcoded parameters for be
 
 ## Domain Constraints
 
-<!-- Define your project-specific non-negotiables here. -->
-<!-- These are the rules that, if violated, would make the system fundamentally broken. -->
-<!-- Examples: -->
-<!-- - No unauthorized access to user data -->
-<!-- - All monetary calculations use decimal, never floating point -->
-<!-- - Every API endpoint must be authenticated -->
-<!-- - No external network calls during unit tests -->
+### No Audio Data on GPU (v1)
+
+Whisper runs on CPU only. The full 24GB of GPU VRAM is reserved for Qwen3-VL. This prevents OOM conditions during parallel processing.
+
+### mp4 Input Only (v1)
+
+Only mp4 files are accepted as input. No format conversion, no container sniffing. If a user has a different format, they convert with ffmpeg themselves.
+
+### Segments Are Immutable After Merge
+
+Once segments from all chunks are merged and sorted into the final timeline, no post-processing modifies their content. The output JSON is a faithful representation of what the models produced. Any transformation (human-readable formatting, SRT export, etc.) happens in a separate layer.
+
+### Checkpoint Integrity
+
+A chunk checkpoint file is only written after the chunk is fully processed by both pipelines. Partial results are never checkpointed. This ensures resumability is always safe — a checkpoint either has complete data or doesn't exist.
+
+### No Network Calls From Client to Models
+
+The client never communicates directly with Ollama or Whisper. All model interaction goes through the server. This keeps the client thin and the server as the single point of control for processing.

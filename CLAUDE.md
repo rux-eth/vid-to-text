@@ -1,76 +1,25 @@
 # CLAUDE.md
 
-<!-- STATUS: uninitialized -->
-<!-- When status is "uninitialized", Claude runs the onboarding flow below. -->
-<!-- After onboarding, Claude replaces this entire file with project-specific guidance. -->
-
-## Onboarding Instructions (for Claude)
-
-This is a fresh project created from the **vibe-rails** template. The project has not been initialized yet.
-
-**Trigger**: When the user sends "init", "start", "begin", "hello", "hi", or any first message, check the status marker above. If it says `uninitialized`, ask the user **"What do you want to build?"**
-
-Then follow these steps exactly:
-
-### Step 1: Understand the vision
-
-Ask clarifying questions until you understand:
-- What the project does (core purpose)
-- Who it's for (target users/audience)
-- What tech stack they want (language, frameworks, infrastructure)
-- Any hard constraints they already know about
-
-Do NOT start suggesting architecture yet. Just listen and ask questions.
-
-### Step 2: Run the design planning procedure
-
-Once you have enough context, follow `PROCEDURE-design-planning.md` exactly:
-- **Idea phase**: restate what you heard, confirm understanding
-- **Decisions phase**: work through architectural choices one at a time
-- **Convergence phase**: summarize all decisions, get user confirmation
-- **Docs phase**: populate the doc templates (see Step 3)
-
-### Step 3: Populate project docs
-
-Based on the design session, fill in:
-
-1. **`docs/ARCHITECTURE.md`** — replace the skeleton with actual architecture decisions:
-   - System overview
-   - Component/service descriptions
-   - Data flow
-   - Key abstractions/traits/interfaces
-   - Storage strategy
-   - Testing strategy
-
-2. **`docs/CONSTRAINTS.md`** — keep the structural constraints, add domain-specific non-negotiables the user defined
-
-3. **`docs/ROADMAP.md`** — create phased PR plan with dependencies. Each PR gets a file in `prs/` with:
-   - Scope (what's included)
-   - Dependencies (what must be done first)
-   - Verification criteria (how to prove it works)
-
-4. **`docs/DESIGN-log.md`** — capture the design conversation (decisions + rationale)
-
-### Step 4: Rewrite this file
-
-Replace this entire `CLAUDE.md` with project-specific guidance. Use this structure:
-
-```markdown
-# CLAUDE.md
-
 <!-- STATUS: initialized -->
 
-## What Is [Project Name]
+## What Is vid-to-text
 
-[One paragraph description]
+A Rust client/server tool that converts mp4 videos into structured JSON combining timestamped speech transcription (`[SPEECH]`), visual scene descriptions (`[VISUAL]`), and sound event tags (`[SOUND]`). The CLI client runs on the user's laptop and dispatches jobs to a server on a desktop with an RTX 4090, which runs Whisper (CPU) and Qwen3-VL-8B-Thinking (GPU via Ollama) in parallel.
 
 ## Build & Test Commands
 
-[Language/framework specific commands]
+```bash
+cargo build --workspace        # Build all crates
+cargo test --workspace         # Run all tests
+cargo run -p vtt-client -- --help   # Client CLI help
+cargo run -p vtt-server -- --help   # Server help
+```
 
 ## Architecture
 
-[Summary + pointer to docs/ARCHITECTURE.md]
+Client/server split: `vtt-client` (laptop) sends mp4 files over HTTP to `vtt-server` (desktop with GPU). Server chunks video via ffmpeg, runs Whisper on CPU and Qwen3-VL on GPU in parallel, merges results into sorted JSON timeline, returns to client.
+
+See `docs/ARCHITECTURE.md` for the full architecture reference.
 
 ## Implementation Status
 
@@ -88,23 +37,12 @@ See `docs/ROADMAP.md` for the ordered PR plan. Full PR descriptions in `prs/`.
 
 ## Constraints
 
-[List non-negotiables from docs/CONSTRAINTS.md]
-```
-
-### Step 5: Confirm completion
-
-Tell the user: "Project initialized. Here's what I set up: [summary]. Ready to start on PR-001?"
-
----
-
-## Ongoing Behavior (post-initialization)
-
-Once initialized, Claude should:
-
-- **Follow the constraints** in `docs/CONSTRAINTS.md` at all times
-- **Update docs with code** — every code change includes doc updates in the same commit
-- **Use the PR workflow** — work is tracked in `prs/`, status in `docs/ROADMAP.md`
-- **Run code audits** after design sessions (per `PROCEDURE-code-audit.md`)
-- **Run design planning** for new features (per `PROCEDURE-design-planning.md`)
-- **Never create phantom implementations** — if it's not tested, it's not done
-- **All configurable values from config files** — zero hardcoded parameters
+- **No phantom implementations** — if it's not tested, it's not done
+- **Documentation accuracy** — every code change includes doc updates in the same commit
+- **One PR, one thing** — no scope creep
+- **Config over hardcoding** — zero hardcoded parameters, all values from TOML config
+- **No audio on GPU (v1)** — Whisper on CPU only, full VRAM for Qwen3-VL
+- **mp4 only (v1)** — no format conversion
+- **Segments immutable after merge** — output is faithful to model output
+- **Checkpoint integrity** — only fully-processed chunks are checkpointed
+- **Client never talks to models directly** — all model interaction through the server
