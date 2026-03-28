@@ -59,7 +59,7 @@ No database. File-based only:
 
 - **Chunk checkpoints**: Completed chunk results stored as JSON files in a temp directory on the server (e.g., `/tmp/vtt-jobs/<job-id>/chunk-003.json`). Enables resumability.
 - **Final output**: JSON file written alongside the input mp4 (default) or at a user-specified path.
-- **Config**: TOML files at `~/.config/vid-to-text/config.toml` on both client and server.
+- **Config**: TOML files at `~/.config/vid-to-text/`. Client uses `client.toml`, server uses `server.toml` (separate files since they run on different machines).
 
 ## Testing Strategy
 
