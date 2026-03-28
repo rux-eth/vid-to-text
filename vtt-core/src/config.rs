@@ -100,6 +100,7 @@ pub struct WhisperConfig {
     pub model_path: String,
     pub model_size: String,
     pub language: String,
+    pub n_threads: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +176,7 @@ impl Default for WhisperConfig {
             model_path: "models/ggml-large-v3-turbo.bin".to_string(),
             model_size: "large-v3-turbo".to_string(),
             language: "en".to_string(),
+            n_threads: 8,
         }
     }
 }
@@ -239,6 +241,11 @@ impl ServerConfig {
         if self.whisper.model_path.is_empty() {
             return Err(VttError::Config(
                 "whisper.model_path must not be empty".into(),
+            ));
+        }
+        if self.whisper.n_threads == 0 {
+            return Err(VttError::Config(
+                "whisper.n_threads must be greater than 0".into(),
             ));
         }
         if self.ollama.endpoint.is_empty() {
@@ -446,6 +453,7 @@ frame_quality = 5
 model_path = "/models/whisper.bin"
 model_size = "medium"
 language = "ja"
+n_threads = 4
 
 [ollama]
 endpoint = "http://192.168.1.100:11434"
@@ -469,6 +477,7 @@ temp_dir = "/var/tmp/vtt"
         assert_eq!(config.whisper.model_path, "/models/whisper.bin");
         assert_eq!(config.whisper.model_size, "medium");
         assert_eq!(config.whisper.language, "ja");
+        assert_eq!(config.whisper.n_threads, 4);
         assert_eq!(config.ollama.endpoint, "http://192.168.1.100:11434");
         assert_eq!(config.ollama.model, "qwen3-vl:latest");
         assert_eq!(
@@ -610,6 +619,19 @@ listen_port = "not a number"
     fn test_server_validation_rejects_high_frame_quality() {
         let mut config = ServerConfig::default();
         config.ffmpeg.frame_quality = 32;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_whisper_n_threads_default() {
+        let config = WhisperConfig::default();
+        assert_eq!(config.n_threads, 8);
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_n_threads() {
+        let mut config = ServerConfig::default();
+        config.whisper.n_threads = 0;
         assert!(config.validate().is_err());
     }
 }

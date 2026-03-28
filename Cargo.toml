@@ -20,3 +20,5 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 dirs = "6"
 tempfile = "3"
+whisper-rs = "0.16"
+hound = "3.5"
