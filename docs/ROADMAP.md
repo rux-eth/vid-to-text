@@ -12,7 +12,7 @@ Full PR descriptions live in `prs/`. This file is the index.
 
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
-| [PR-001](../prs/PR-001-project-skeleton.md) | Project skeleton — workspace, crates, config types, CLI scaffolding | `[ ]` | — |
+| [PR-001](../prs/PR-001-project-skeleton.md) | Project skeleton — workspace, crates, config types, CLI scaffolding | `[x]` | — |
 | [PR-002](../prs/PR-002-config-system.md) | TOML config loading with CLI flag overrides | `[ ]` | PR-001 |
 
 ## Phase 2: Server Core

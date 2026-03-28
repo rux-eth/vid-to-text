@@ -1,0 +1,550 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+use crate::VttError;
+
+// --- Client Config ---
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientConfig {
+    pub server: ClientServerConfig,
+    pub output: ClientOutputConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientOutputConfig {
+    pub dir: Option<String>,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            server: ClientServerConfig::default(),
+            output: ClientOutputConfig::default(),
+        }
+    }
+}
+
+impl Default for ClientServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "localhost".to_string(),
+            port: 3000,
+        }
+    }
+}
+
+impl Default for ClientOutputConfig {
+    fn default() -> Self {
+        Self { dir: None }
+    }
+}
+
+impl ClientConfig {
+    pub fn validate(&self) -> Result<(), VttError> {
+        if self.server.host.is_empty() {
+            return Err(VttError::Config("server.host must not be empty".into()));
+        }
+        if self.server.port == 0 {
+            return Err(VttError::Config("server.port must be greater than 0".into()));
+        }
+        Ok(())
+    }
+
+    pub fn server_url(&self) -> String {
+        format!("http://{}:{}", self.server.host, self.server.port)
+    }
+}
+
+// --- Server Config ---
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub server: ServerListenConfig,
+    pub ffmpeg: FfmpegConfig,
+    pub whisper: WhisperConfig,
+    pub ollama: OllamaConfig,
+    pub vision: VisionConfig,
+    pub processing: ProcessingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerListenConfig {
+    pub listen_address: String,
+    pub listen_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FfmpegConfig {
+    pub path: String,
+    pub chunk_duration_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WhisperConfig {
+    pub model_path: String,
+    pub model_size: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OllamaConfig {
+    pub endpoint: String,
+    pub model: String,
+    pub prompt_template_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisionConfig {
+    pub fps: f32,
+    pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessingConfig {
+    pub temp_dir: String,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            server: ServerListenConfig::default(),
+            ffmpeg: FfmpegConfig::default(),
+            whisper: WhisperConfig::default(),
+            ollama: OllamaConfig::default(),
+            vision: VisionConfig::default(),
+            processing: ProcessingConfig::default(),
+        }
+    }
+}
+
+impl Default for ServerListenConfig {
+    fn default() -> Self {
+        Self {
+            listen_address: "0.0.0.0".to_string(),
+            listen_port: 3000,
+        }
+    }
+}
+
+impl Default for FfmpegConfig {
+    fn default() -> Self {
+        Self {
+            path: "ffmpeg".to_string(),
+            chunk_duration_secs: 180,
+        }
+    }
+}
+
+impl Default for WhisperConfig {
+    fn default() -> Self {
+        Self {
+            model_path: "models/ggml-large-v3-turbo.bin".to_string(),
+            model_size: "large-v3-turbo".to_string(),
+            language: "en".to_string(),
+        }
+    }
+}
+
+impl Default for OllamaConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://localhost:11434".to_string(),
+            model: "qwen3-vl:8b".to_string(),
+            prompt_template_path: None,
+        }
+    }
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            fps: 2.0,
+            max_tokens: 4096,
+        }
+    }
+}
+
+impl Default for ProcessingConfig {
+    fn default() -> Self {
+        Self {
+            temp_dir: "/tmp/vtt-jobs".to_string(),
+        }
+    }
+}
+
+impl ServerConfig {
+    pub fn validate(&self) -> Result<(), VttError> {
+        if self.server.listen_address.is_empty() {
+            return Err(VttError::Config(
+                "server.listen_address must not be empty".into(),
+            ));
+        }
+        if self.server.listen_port == 0 {
+            return Err(VttError::Config(
+                "server.listen_port must be greater than 0".into(),
+            ));
+        }
+        if self.ffmpeg.path.is_empty() {
+            return Err(VttError::Config("ffmpeg.path must not be empty".into()));
+        }
+        if self.ffmpeg.chunk_duration_secs == 0 {
+            return Err(VttError::Config(
+                "ffmpeg.chunk_duration_secs must be greater than 0".into(),
+            ));
+        }
+        if self.whisper.model_path.is_empty() {
+            return Err(VttError::Config(
+                "whisper.model_path must not be empty".into(),
+            ));
+        }
+        if self.ollama.endpoint.is_empty() {
+            return Err(VttError::Config(
+                "ollama.endpoint must not be empty".into(),
+            ));
+        }
+        if self.ollama.model.is_empty() {
+            return Err(VttError::Config("ollama.model must not be empty".into()));
+        }
+        if self.vision.fps <= 0.0 {
+            return Err(VttError::Config(
+                "vision.fps must be greater than 0".into(),
+            ));
+        }
+        if self.vision.max_tokens == 0 {
+            return Err(VttError::Config(
+                "vision.max_tokens must be greater than 0".into(),
+            ));
+        }
+        if self.processing.temp_dir.is_empty() {
+            return Err(VttError::Config(
+                "processing.temp_dir must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn bind_address(&self) -> String {
+        format!("{}:{}", self.server.listen_address, self.server.listen_port)
+    }
+}
+
+// --- Config Loading ---
+
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("vid-to-text"))
+}
+
+pub fn config_file_path(filename: &str) -> Option<PathBuf> {
+    config_dir().map(|d| d.join(filename))
+}
+
+pub fn config_file_exists(filename: &str) -> bool {
+    config_file_path(filename)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
+pub fn load_config<T>(filename: &str) -> Result<T, VttError>
+where
+    T: Default + serde::de::DeserializeOwned,
+{
+    let path = config_file_path(filename)
+        .ok_or_else(|| VttError::Config("could not determine config directory".into()))?;
+
+    if !path.exists() {
+        return Ok(T::default());
+    }
+
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| VttError::Config(format!("failed to read {}: {}", path.display(), e)))?;
+
+    toml::from_str(&contents)
+        .map_err(|e| VttError::Config(format!("failed to parse {}: {}", path.display(), e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Default validity ---
+
+    #[test]
+    fn test_client_config_defaults_are_valid() {
+        let config = ClientConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_server_config_defaults_are_valid() {
+        let config = ServerConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    // --- Default values ---
+
+    #[test]
+    fn test_client_config_default_values() {
+        let config = ClientConfig::default();
+        assert_eq!(config.server.host, "localhost");
+        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.output.dir, None);
+    }
+
+    #[test]
+    fn test_server_config_default_values() {
+        let config = ServerConfig::default();
+        assert_eq!(config.server.listen_address, "0.0.0.0");
+        assert_eq!(config.server.listen_port, 3000);
+        assert_eq!(config.ffmpeg.path, "ffmpeg");
+        assert_eq!(config.ffmpeg.chunk_duration_secs, 180);
+        assert_eq!(config.whisper.language, "en");
+        assert_eq!(config.ollama.endpoint, "http://localhost:11434");
+        assert_eq!(config.ollama.model, "qwen3-vl:8b");
+        assert_eq!(config.vision.fps, 2.0);
+        assert_eq!(config.vision.max_tokens, 4096);
+        assert_eq!(config.processing.temp_dir, "/tmp/vtt-jobs");
+    }
+
+    // --- TOML roundtrip ---
+
+    #[test]
+    fn test_client_config_toml_roundtrip() {
+        let config = ClientConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: ClientConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn test_server_config_toml_roundtrip() {
+        let config = ServerConfig::default();
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: ServerConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    // --- Partial TOML fills defaults ---
+
+    #[test]
+    fn test_partial_client_config() {
+        let toml_str = r#"
+[server]
+host = "myserver.ts.net"
+"#;
+        let config: ClientConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.host, "myserver.ts.net");
+        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.output.dir, None);
+    }
+
+    #[test]
+    fn test_partial_server_config() {
+        let toml_str = r#"
+[ffmpeg]
+chunk_duration_secs = 120
+
+[vision]
+fps = 1.0
+"#;
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.ffmpeg.chunk_duration_secs, 120);
+        assert_eq!(config.vision.fps, 1.0);
+        assert_eq!(config.server.listen_port, 3000);
+        assert_eq!(config.ollama.model, "qwen3-vl:8b");
+    }
+
+    // --- Empty TOML gives defaults ---
+
+    #[test]
+    fn test_empty_toml_gives_client_defaults() {
+        let config: ClientConfig = toml::from_str("").unwrap();
+        assert_eq!(config, ClientConfig::default());
+    }
+
+    #[test]
+    fn test_empty_toml_gives_server_defaults() {
+        let config: ServerConfig = toml::from_str("").unwrap();
+        assert_eq!(config, ServerConfig::default());
+    }
+
+    // --- Full TOML with every field ---
+
+    #[test]
+    fn test_client_config_full_toml() {
+        let toml_str = r#"
+[server]
+host = "192.168.1.100"
+port = 8080
+
+[output]
+dir = "/home/user/output"
+"#;
+        let config: ClientConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.host, "192.168.1.100");
+        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.output.dir, Some("/home/user/output".to_string()));
+    }
+
+    #[test]
+    fn test_server_config_full_toml() {
+        let toml_str = r#"
+[server]
+listen_address = "127.0.0.1"
+listen_port = 8080
+
+[ffmpeg]
+path = "/usr/local/bin/ffmpeg"
+chunk_duration_secs = 120
+
+[whisper]
+model_path = "/models/whisper.bin"
+model_size = "medium"
+language = "ja"
+
+[ollama]
+endpoint = "http://192.168.1.100:11434"
+model = "qwen3-vl:latest"
+prompt_template_path = "/etc/vtt/prompt.txt"
+
+[vision]
+fps = 1.0
+max_tokens = 8192
+
+[processing]
+temp_dir = "/var/tmp/vtt"
+"#;
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.listen_address, "127.0.0.1");
+        assert_eq!(config.server.listen_port, 8080);
+        assert_eq!(config.ffmpeg.path, "/usr/local/bin/ffmpeg");
+        assert_eq!(config.ffmpeg.chunk_duration_secs, 120);
+        assert_eq!(config.whisper.model_path, "/models/whisper.bin");
+        assert_eq!(config.whisper.model_size, "medium");
+        assert_eq!(config.whisper.language, "ja");
+        assert_eq!(config.ollama.endpoint, "http://192.168.1.100:11434");
+        assert_eq!(config.ollama.model, "qwen3-vl:latest");
+        assert_eq!(
+            config.ollama.prompt_template_path,
+            Some("/etc/vtt/prompt.txt".to_string())
+        );
+        assert_eq!(config.vision.fps, 1.0);
+        assert_eq!(config.vision.max_tokens, 8192);
+        assert_eq!(config.processing.temp_dir, "/var/tmp/vtt");
+    }
+
+    // --- Validation rejects bad values ---
+
+    #[test]
+    fn test_client_validation_rejects_empty_host() {
+        let mut config = ClientConfig::default();
+        config.server.host = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validation_rejects_zero_port() {
+        let mut config = ClientConfig::default();
+        config.server.port = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_port() {
+        let mut config = ServerConfig::default();
+        config.server.listen_port = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_chunk_duration() {
+        let mut config = ServerConfig::default();
+        config.ffmpeg.chunk_duration_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_fps() {
+        let mut config = ServerConfig::default();
+        config.vision.fps = 0.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_negative_fps() {
+        let mut config = ServerConfig::default();
+        config.vision.fps = -1.0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_empty_ollama_endpoint() {
+        let mut config = ServerConfig::default();
+        config.ollama.endpoint = String::new();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_max_tokens() {
+        let mut config = ServerConfig::default();
+        config.vision.max_tokens = 0;
+        assert!(config.validate().is_err());
+    }
+
+    // --- Invalid TOML ---
+
+    #[test]
+    fn test_invalid_toml_syntax() {
+        let result = toml::from_str::<ServerConfig>("this is [not valid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wrong_type_in_toml() {
+        let result = toml::from_str::<ServerConfig>(
+            r#"
+[server]
+listen_port = "not a number"
+"#,
+        );
+        assert!(result.is_err());
+    }
+
+    // --- load_config with missing file ---
+
+    #[test]
+    fn test_load_config_missing_file_returns_defaults() {
+        let config: ClientConfig = load_config("nonexistent_test_file.toml").unwrap();
+        assert_eq!(config, ClientConfig::default());
+    }
+
+    // --- Helper methods ---
+
+    #[test]
+    fn test_client_server_url() {
+        let config = ClientConfig::default();
+        assert_eq!(config.server_url(), "http://localhost:3000");
+    }
+
+    #[test]
+    fn test_server_bind_address() {
+        let config = ServerConfig::default();
+        assert_eq!(config.bind_address(), "0.0.0.0:3000");
+    }
+}
