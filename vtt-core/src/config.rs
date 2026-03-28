@@ -109,6 +109,7 @@ pub struct OllamaConfig {
     pub endpoint: String,
     pub model: String,
     pub prompt_template_path: Option<String>,
+    pub timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +117,7 @@ pub struct OllamaConfig {
 pub struct VisionConfig {
     pub fps: f32,
     pub max_tokens: u32,
+    pub max_frames_per_request: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +189,7 @@ impl Default for OllamaConfig {
             endpoint: "http://localhost:11434".to_string(),
             model: "qwen3-vl:8b".to_string(),
             prompt_template_path: None,
+            timeout_seconds: 300,
         }
     }
 }
@@ -196,6 +199,7 @@ impl Default for VisionConfig {
         Self {
             fps: 2.0,
             max_tokens: 4096,
+            max_frames_per_request: 360,
         }
     }
 }
@@ -256,6 +260,11 @@ impl ServerConfig {
         if self.ollama.model.is_empty() {
             return Err(VttError::Config("ollama.model must not be empty".into()));
         }
+        if self.ollama.timeout_seconds == 0 {
+            return Err(VttError::Config(
+                "ollama.timeout_seconds must be greater than 0".into(),
+            ));
+        }
         if self.vision.fps <= 0.0 {
             return Err(VttError::Config(
                 "vision.fps must be greater than 0".into(),
@@ -264,6 +273,11 @@ impl ServerConfig {
         if self.vision.max_tokens == 0 {
             return Err(VttError::Config(
                 "vision.max_tokens must be greater than 0".into(),
+            ));
+        }
+        if self.vision.max_frames_per_request == 0 {
+            return Err(VttError::Config(
+                "vision.max_frames_per_request must be greater than 0".into(),
             ));
         }
         if self.processing.temp_dir.is_empty() {
@@ -459,10 +473,12 @@ n_threads = 4
 endpoint = "http://192.168.1.100:11434"
 model = "qwen3-vl:latest"
 prompt_template_path = "/etc/vtt/prompt.txt"
+timeout_seconds = 600
 
 [vision]
 fps = 1.0
 max_tokens = 8192
+max_frames_per_request = 500
 
 [processing]
 temp_dir = "/var/tmp/vtt"
@@ -484,8 +500,10 @@ temp_dir = "/var/tmp/vtt"
             config.ollama.prompt_template_path,
             Some("/etc/vtt/prompt.txt".to_string())
         );
+        assert_eq!(config.ollama.timeout_seconds, 600);
         assert_eq!(config.vision.fps, 1.0);
         assert_eq!(config.vision.max_tokens, 8192);
+        assert_eq!(config.vision.max_frames_per_request, 500);
         assert_eq!(config.processing.temp_dir, "/var/tmp/vtt");
     }
 
@@ -632,6 +650,32 @@ listen_port = "not a number"
     fn test_server_validation_rejects_zero_n_threads() {
         let mut config = ServerConfig::default();
         config.whisper.n_threads = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_ollama_timeout_default() {
+        let config = OllamaConfig::default();
+        assert_eq!(config.timeout_seconds, 300);
+    }
+
+    #[test]
+    fn test_vision_max_frames_default() {
+        let config = VisionConfig::default();
+        assert_eq!(config.max_frames_per_request, 360);
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_timeout() {
+        let mut config = ServerConfig::default();
+        config.ollama.timeout_seconds = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_max_frames() {
+        let mut config = ServerConfig::default();
+        config.vision.max_frames_per_request = 0;
         assert!(config.validate().is_err());
     }
 }
