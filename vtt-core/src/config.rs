@@ -11,6 +11,7 @@ pub struct ClientConfig {
     pub server: ClientServerConfig,
     pub output: ClientOutputConfig,
     pub polling: ClientPollingConfig,
+    pub openai: OpenAIConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,12 +43,33 @@ impl Default for ClientPollingConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenAIConfig {
+    pub model: String,
+    pub endpoint: String,
+    pub max_tokens: u32,
+    pub format_prompt_path: Option<String>,
+}
+
+impl Default for OpenAIConfig {
+    fn default() -> Self {
+        Self {
+            model: "gpt-5.4".to_string(),
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            max_tokens: 4096,
+            format_prompt_path: None,
+        }
+    }
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             server: ClientServerConfig::default(),
             output: ClientOutputConfig::default(),
             polling: ClientPollingConfig::default(),
+            openai: OpenAIConfig::default(),
         }
     }
 }
@@ -83,6 +105,17 @@ impl ClientConfig {
         if self.polling.timeout_secs == 0 {
             return Err(VttError::Config(
                 "polling.timeout_secs must be greater than 0".into(),
+            ));
+        }
+        if self.openai.model.is_empty() {
+            return Err(VttError::Config("openai.model must not be empty".into()));
+        }
+        if self.openai.endpoint.is_empty() {
+            return Err(VttError::Config("openai.endpoint must not be empty".into()));
+        }
+        if self.openai.max_tokens == 0 {
+            return Err(VttError::Config(
+                "openai.max_tokens must be greater than 0".into(),
             ));
         }
         Ok(())
