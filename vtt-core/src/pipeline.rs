@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     clear_checkpoints, load_checkpoints, parse_timestamp, prepare_chunks, save_checkpoint,
@@ -23,7 +24,11 @@ pub async fn process_video(
 ) -> Result<Timeline, VttError> {
     config.validate()?;
 
+    let pipeline_start = Instant::now();
+
+    let t = Instant::now();
     let manifest = prepare_chunks(config, video_path, job_id).await?;
+    eprintln!("[timing] prepare_chunks: {:.1}s ({} chunks)", t.elapsed().as_secs_f64(), manifest.chunks.len());
 
     let source = source_name
         .map(|s| s.to_string())
@@ -45,11 +50,15 @@ pub async fn process_video(
     let all_cached = cached.len() == manifest.chunks.len() && !manifest.chunks.is_empty();
 
     // Only initialize models if there are uncached chunks to process
+    let t = Instant::now();
     let whisper_model = if all_cached {
         None
     } else {
         Some(Arc::new(WhisperModel::new(&config.whisper)?))
     };
+    if !all_cached {
+        eprintln!("[timing] whisper_model_load: {:.1}s", t.elapsed().as_secs_f64());
+    }
 
     let ollama_client = if all_cached {
         None
@@ -60,31 +69,41 @@ pub async fn process_video(
     let mut all_chunk_segments = Vec::new();
 
     for artifact in &manifest.chunks {
+        let chunk_start = Instant::now();
+        let ci = artifact.chunk.index;
+
         let chunk_segments = if let Some(segments) = cached.get(&artifact.chunk.index) {
+            eprintln!("[timing] chunk_{ci}: loaded from checkpoint");
             segments.clone()
         } else {
             let model = whisper_model.as_ref().unwrap();
             let client = ollama_client.as_ref().unwrap();
 
             // Step 1: Whisper transcription (CPU, via spawn_blocking)
+            let t = Instant::now();
             let whisper_segments = transcribe_chunk(
                 Arc::clone(model),
                 artifact.audio_path.clone(),
                 artifact.chunk.clone(),
             )
             .await?;
+            eprintln!("[timing] chunk_{ci} whisper: {:.1}s ({} segments)", t.elapsed().as_secs_f64(), whisper_segments.len());
 
             // Step 2: Extract transcript for vision context
             let transcript = extract_transcript(&whisper_segments);
 
             // Step 3: Vision description (GPU, via Ollama HTTP)
+            let t = Instant::now();
             let vision_segments = client
                 .describe_chunk(
                     &artifact.chunk,
                     &artifact.frame_paths,
                     transcript.as_deref(),
+                    config.vision.fps,
                 )
                 .await?;
+            let n_batches = (artifact.frame_paths.len() + config.vision.max_frames_per_request as usize - 1) / config.vision.max_frames_per_request as usize;
+            eprintln!("[timing] chunk_{ci} vision: {:.1}s ({} frames, {} batches, {} segments)", t.elapsed().as_secs_f64(), artifact.frame_paths.len(), n_batches, vision_segments.len());
 
             // Combine segments from both pipelines
             let mut combined = whisper_segments;
@@ -102,10 +121,12 @@ pub async fn process_video(
             combined
         };
 
+        eprintln!("[timing] chunk_{ci} total: {:.1}s", chunk_start.elapsed().as_secs_f64());
         all_chunk_segments.push(chunk_segments);
     }
 
     let timeline = merge_segments(&source, manifest.duration_seconds, all_chunk_segments);
+    eprintln!("[timing] pipeline total: {:.1}s", pipeline_start.elapsed().as_secs_f64());
 
     // Clean up checkpoints after successful merge
     if config.processing.cleanup_checkpoints {

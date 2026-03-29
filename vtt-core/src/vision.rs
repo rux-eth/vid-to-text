@@ -27,6 +27,7 @@ struct OllamaChatMessage {
 #[derive(Debug, Serialize)]
 struct OllamaOptions {
     num_predict: u32,
+    num_ctx: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +60,7 @@ pub struct OllamaClient {
     prompt_template: String,
     max_tokens: u32,
     max_frames_per_request: u32,
+    num_ctx: u32,
 }
 
 impl OllamaClient {
@@ -81,6 +83,7 @@ impl OllamaClient {
             prompt_template,
             max_tokens: vision_config.max_tokens,
             max_frames_per_request: vision_config.max_frames_per_request,
+            num_ctx: ollama_config.num_ctx,
         })
     }
 
@@ -125,12 +128,13 @@ impl OllamaClient {
     /// Describe the visual content of a chunk's frames.
     /// If a transcript is provided, it is included in the prompt so the vision
     /// model can relate visual content to what was said/heard.
-    /// Returns a single Visual segment spanning the chunk's time range.
+    /// Returns one Visual segment per batch of frames for fine-grained temporal resolution.
     pub async fn describe_chunk(
         &self,
         chunk: &Chunk,
         frame_paths: &[PathBuf],
         transcript: Option<&str>,
+        fps: f32,
     ) -> Result<Vec<Segment>, VttError> {
         if frame_paths.is_empty() {
             return Ok(Vec::new());
@@ -138,50 +142,80 @@ impl OllamaClient {
 
         let prompt = build_prompt(&self.prompt_template, transcript);
         let encoded = encode_frames_base64(frame_paths).await?;
+        let batch_size = self.max_frames_per_request as usize;
+        let seconds_per_frame = 1.0 / fps as f64;
 
-        let mut descriptions = Vec::new();
-        for batch in encoded.chunks(self.max_frames_per_request as usize) {
-            let request = build_chat_request(
-                &self.model,
-                &prompt,
-                batch.to_vec(),
-                self.max_tokens,
-            );
+        let mut segments = Vec::new();
+        for (batch_idx, batch) in encoded.chunks(batch_size).enumerate() {
+            let frame_offset = batch_idx * batch_size;
+            let batch_start = chunk.start_seconds + (frame_offset as f64 * seconds_per_frame);
+            let batch_end = (chunk.start_seconds
+                + ((frame_offset + batch.len()) as f64 * seconds_per_frame))
+                .min(chunk.end_seconds);
 
-            let url = format!("{}/api/chat", self.endpoint);
-            let resp = self
-                .client
-                .post(&url)
-                .json(&request)
-                .send()
-                .await
-                .map_err(|e| VttError::Vision(format!("Ollama request failed: {e}")))?;
+            // Retry up to 3 times on empty response
+            let mut description = None;
+            for attempt in 0..3 {
+                let request = build_chat_request(
+                    &self.model,
+                    &prompt,
+                    batch.to_vec(),
+                    self.max_tokens,
+                    self.num_ctx,
+                );
 
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(VttError::Vision(format!(
-                    "Ollama returned status {status}: {body}"
-                )));
+                let url = format!("{}/api/chat", self.endpoint);
+                let resp = self
+                    .client
+                    .post(&url)
+                    .json(&request)
+                    .send()
+                    .await
+                    .map_err(|e| VttError::Vision(format!("Ollama request failed: {e}")))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(VttError::Vision(format!(
+                        "Ollama returned status {status}: {body}"
+                    )));
+                }
+
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| {
+                        VttError::Vision(format!("failed to read Ollama response: {e}"))
+                    })?;
+
+                match parse_vision_response(&body) {
+                    Ok(desc) => {
+                        description = Some(desc);
+                        break;
+                    }
+                    Err(_) if attempt < 2 => {
+                        eprintln!(
+                            "[vision] batch {} returned empty, retrying ({}/3)...",
+                            batch_idx,
+                            attempt + 2
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
             }
 
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| VttError::Vision(format!("failed to read Ollama response: {e}")))?;
-
-            let description = parse_vision_response(&body)?;
-            descriptions.push(description);
+            if let Some(content) = description {
+                segments.push(Segment {
+                    segment_type: SegmentType::Visual,
+                    start: format_timestamp(batch_start),
+                    end: format_timestamp(batch_end),
+                    content,
+                });
+            }
         }
 
-        let content = descriptions.join("\n\n");
-
-        Ok(vec![Segment {
-            segment_type: SegmentType::Visual,
-            start: format_timestamp(chunk.start_seconds),
-            end: format_timestamp(chunk.end_seconds),
-            content,
-        }])
+        Ok(segments)
     }
 }
 
@@ -226,6 +260,7 @@ fn build_chat_request(
     prompt: &str,
     images: Vec<String>,
     max_tokens: u32,
+    num_ctx: u32,
 ) -> OllamaChatRequest {
     OllamaChatRequest {
         model: model.to_string(),
@@ -237,6 +272,7 @@ fn build_chat_request(
         stream: false,
         options: OllamaOptions {
             num_predict: max_tokens,
+            num_ctx,
         },
     }
 }
@@ -325,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_build_chat_request_structure() {
-        let request = build_chat_request("qwen3-vl:8b", "Describe this.", vec!["abc".into(), "def".into()], 4096);
+        let request = build_chat_request("qwen3-vl:8b", "Describe this.", vec!["abc".into(), "def".into()], 4096, 32768);
         assert_eq!(request.model, "qwen3-vl:8b");
         assert!(!request.stream);
         assert_eq!(request.options.num_predict, 4096);
@@ -337,13 +373,13 @@ mod tests {
 
     #[test]
     fn test_build_chat_request_empty_images() {
-        let request = build_chat_request("model", "prompt", vec![], 1024);
+        let request = build_chat_request("model", "prompt", vec![], 1024, 32768);
         assert!(request.messages[0].images.is_empty());
     }
 
     #[test]
     fn test_chat_request_serialization() {
-        let request = build_chat_request("model", "prompt", vec!["img1".into()], 1024);
+        let request = build_chat_request("model", "prompt", vec!["img1".into()], 1024, 32768);
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["model"], "model");
         assert_eq!(json["stream"], false);
@@ -353,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_chat_request_serialization_skips_empty_images() {
-        let request = build_chat_request("model", "prompt", vec![], 1024);
+        let request = build_chat_request("model", "prompt", vec![], 1024, 32768);
         let json = serde_json::to_value(&request).unwrap();
         assert!(json["messages"][0].get("images").is_none());
     }
@@ -381,6 +417,7 @@ mod tests {
         assert_eq!(result, "The scene shows a cat on a windowsill.");
     }
 
+    #[test]
     fn test_parse_vision_response_thinking_empty() {
         let body = r#"{"message":{"role":"assistant","content":"<think>   </think>   "}}"#;
         let result = parse_vision_response(body);
@@ -514,7 +551,7 @@ mod tests {
             end_seconds: 3.0,
         };
 
-        let segments = client.describe_chunk(&chunk, &[frame_path], None).await.unwrap();
+        let segments = client.describe_chunk(&chunk, &[frame_path], None, 2.0).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());

@@ -174,6 +174,7 @@ pub struct OllamaConfig {
     pub prompt_template_path: Option<String>,
     pub default_prompt: String,
     pub timeout_seconds: u64,
+    pub num_ctx: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -281,9 +282,20 @@ impl Default for OllamaConfig {
                 intervals. The frames are in chronological order and represent a continuous \
                 segment of video. Describe the visual content you observe: the setting, people, \
                 objects, actions, and any changes across the sequence. Be specific and concise. \
-                Focus on what is visually happening, not on speculating about audio or dialogue."
+                \
+                Guidelines: \
+                - Read and transcribe any visible text, titles, labels, captions, or graphics on screen. \
+                - Note facial expressions, body language, and emotional tone of characters. \
+                - Identify scene transitions, cuts, camera angle changes, or visual effects. \
+                - Describe spatial relationships: foreground, background, relative positions. \
+                - When a character's mouth appears to be moving during speech from the transcript, \
+                  identify them as the speaker. \
+                - Track characters consistently across frames by their appearance (clothing, color, position). \
+                - Note any inferences you can make from visual cues, but clearly distinguish \
+                  what you see from what you infer. Do not fabricate details that are not visible."
                 .to_string(),
             timeout_seconds: 300,
+            num_ctx: 65536,
         }
     }
 }
@@ -590,6 +602,7 @@ model = "qwen3-vl:latest"
 prompt_template_path = "/etc/vtt/prompt.txt"
 default_prompt = "Custom default prompt"
 timeout_seconds = 600
+num_ctx = 65536
 
 [vision]
 fps = 1.0
@@ -620,6 +633,7 @@ max_upload_bytes = 8589934592
         );
         assert_eq!(config.ollama.default_prompt, "Custom default prompt");
         assert_eq!(config.ollama.timeout_seconds, 600);
+        assert_eq!(config.ollama.num_ctx, 65536);
         assert_eq!(config.vision.fps, 1.0);
         assert_eq!(config.vision.max_tokens, 8192);
         assert_eq!(config.vision.max_frames_per_request, 500);
