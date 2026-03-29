@@ -153,6 +153,7 @@ pub struct VisionConfig {
 pub struct ProcessingConfig {
     pub temp_dir: String,
     pub max_upload_bytes: u64,
+    pub cleanup_checkpoints: bool,
 }
 
 impl Default for ServerConfig {
@@ -238,6 +239,7 @@ impl Default for ProcessingConfig {
         Self {
             temp_dir: "/tmp/vtt-jobs".to_string(),
             max_upload_bytes: 4_294_967_296, // 4 GB
+            cleanup_checkpoints: true,
         }
     }
 }

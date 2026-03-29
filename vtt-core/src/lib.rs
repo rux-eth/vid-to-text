@@ -5,6 +5,7 @@ mod ffmpeg;
 mod whisper;
 mod vision;
 mod pipeline;
+mod checkpoint;
 
 pub use types::*;
 pub use error::*;
@@ -13,3 +14,4 @@ pub use ffmpeg::*;
 pub use whisper::*;
 pub use vision::*;
 pub use pipeline::*;
+pub use checkpoint::*;

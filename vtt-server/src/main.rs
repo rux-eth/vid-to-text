@@ -21,6 +21,8 @@ use vtt_core::{
 #[derive(Debug, Deserialize)]
 struct CreateJobRequest {
     source: String,
+    #[serde(default)]
+    force: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,7 +84,7 @@ impl IntoResponse for ApiError {
 
 // --- Background processing ---
 
-fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf) {
+fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool) {
     tokio::spawn(async move {
         let _permit = state.processing_semaphore.acquire().await.unwrap();
 
@@ -94,7 +96,7 @@ fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf
         }
 
         let job_id_str = job_id.to_string();
-        match process_video(&state.config, &video_path, &job_id_str).await {
+        match process_video(&state.config, &video_path, &job_id_str, force).await {
             Ok(timeline) => {
                 {
                     let mut results = state.results.lock().unwrap();
@@ -184,7 +186,7 @@ async fn create_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source));
+    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source), request.force);
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -201,6 +203,7 @@ async fn upload_job(
         .map_err(|e| ApiError::Internal(format!("failed to create job dir: {e}")))?;
 
     let mut filename = String::new();
+    let mut force = false;
     let upload_path = job_dir.join("input.mp4");
 
     while let Some(field) = multipart
@@ -208,6 +211,12 @@ async fn upload_job(
         .await
         .map_err(|e| ApiError::BadRequest(format!("invalid multipart data: {e}")))?
     {
+        if field.name() == Some("force") {
+            let text = field.text().await.unwrap_or_default();
+            force = text == "true";
+            continue;
+        }
+
         if field.name() == Some("file") {
             filename = field
                 .file_name()
@@ -260,7 +269,7 @@ async fn upload_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, upload_path);
+    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force);
 
     Ok((StatusCode::CREATED, Json(response)))
 }

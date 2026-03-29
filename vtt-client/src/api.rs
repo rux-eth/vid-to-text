@@ -31,6 +31,7 @@ pub async fn upload_file(
     client: &reqwest::Client,
     server_url: &str,
     input_path: &Path,
+    force: bool,
 ) -> Result<JobResponse, String> {
     let filename = input_path
         .file_name()
@@ -48,7 +49,10 @@ pub async fn upload_file(
         .file_name(filename)
         .mime_str("video/mp4")
         .map_err(|e| format!("failed to set mime type: {e}"))?;
-    let form = reqwest::multipart::Form::new().part("file", part);
+    let mut form = reqwest::multipart::Form::new().part("file", part);
+    if force {
+        form = form.text("force", "true");
+    }
 
     let resp = client
         .post(format!("{server_url}/jobs/upload"))

@@ -29,8 +29,7 @@ Full PR descriptions live in `prs/`. This file is the index.
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
 | PR-007 | Server HTTP API — job submission, status, result retrieval | `[x]` | PR-006 |
-| [PR-008](../prs/PR-008-client-commands.md) | Client CLI commands — process (single + directory), doctor | `[ ]` | PR-007 |
-| [PR-009](../prs/PR-009-file-transfer.md) | File transfer — client uploads mp4 to server, downloads JSON result | `[ ]` | PR-008 |
+| PR-008+009 | Client CLI commands + streaming file transfer (combined) | `[x]` | PR-007 |
 
 ## Phase 4: Resilience
 

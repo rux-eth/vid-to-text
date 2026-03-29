@@ -38,6 +38,7 @@ pub async fn process_single_file(
     client: &reqwest::Client,
     config: &ClientConfig,
     input_path: &Path,
+    force: bool,
 ) -> Result<(), String> {
     let server_url = config.server_url();
     let filename = input_path
@@ -48,7 +49,7 @@ pub async fn process_single_file(
 
     // Upload
     eprintln!("Uploading {filename}...");
-    let job = api::upload_file(client, &server_url, input_path).await?;
+    let job = api::upload_file(client, &server_url, input_path, force).await?;
     eprintln!("Job {} created for {filename}", job.id);
 
     // Poll until done
@@ -86,6 +87,7 @@ pub async fn process_directory(
     client: &reqwest::Client,
     config: &ClientConfig,
     dir: &Path,
+    force: bool,
 ) -> Result<(), String> {
     let files = find_mp4_files(dir)?;
 
@@ -99,7 +101,7 @@ pub async fn process_directory(
     let total = files.len();
 
     for file in &files {
-        match process_single_file(client, config, file).await {
+        match process_single_file(client, config, file, force).await {
             Ok(()) => success += 1,
             Err(e) => eprintln!("Error processing {}: {e}", file.display()),
         }
