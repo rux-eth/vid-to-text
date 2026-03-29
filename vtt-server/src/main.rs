@@ -84,7 +84,7 @@ impl IntoResponse for ApiError {
 
 // --- Background processing ---
 
-fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool) {
+fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool, source_name: String) {
     tokio::spawn(async move {
         let _permit = state.processing_semaphore.acquire().await.unwrap();
 
@@ -96,7 +96,7 @@ fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf
         }
 
         let job_id_str = job_id.to_string();
-        match process_video(&state.config, &video_path, &job_id_str, force).await {
+        match process_video(&state.config, &video_path, &job_id_str, force, Some(&source_name)).await {
             Ok(timeline) => {
                 {
                     let mut results = state.results.lock().unwrap();
@@ -186,7 +186,7 @@ async fn create_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source), request.force);
+    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source), request.force, request.source.clone());
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -269,7 +269,7 @@ async fn upload_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force);
+    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force, filename.clone());
 
     Ok((StatusCode::CREATED, Json(response)))
 }

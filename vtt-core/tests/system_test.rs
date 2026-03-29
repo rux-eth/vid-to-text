@@ -29,7 +29,7 @@ async fn test_full_pipeline_with_synthetic_video() {
     config.whisper.model_path = std::env::var("WHISPER_MODEL_PATH")
         .unwrap_or_else(|_| "models/ggml-large-v3-turbo.bin".to_string());
 
-    let timeline = process_video(&config, &video_path, "system-test", false).await.unwrap();
+    let timeline = process_video(&config, &video_path, "system-test", false, None).await.unwrap();
 
     // Print results
     println!("\n=== TIMELINE ===");
