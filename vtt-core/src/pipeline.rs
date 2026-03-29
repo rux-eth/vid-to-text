@@ -19,15 +19,20 @@ pub async fn process_video(
     video_path: &Path,
     job_id: &str,
     force: bool,
+    source_name: Option<&str>,
 ) -> Result<Timeline, VttError> {
     config.validate()?;
 
     let manifest = prepare_chunks(config, video_path, job_id).await?;
 
-    let source = video_path
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| video_path.display().to_string());
+    let source = source_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            video_path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| video_path.display().to_string())
+        });
 
     // Load or clear checkpoints
     let cached = if force {
@@ -344,7 +349,7 @@ mod tests {
             .status()
             .unwrap();
 
-        let timeline = process_video(&config, &video_path, "test-job", false).await.unwrap();
+        let timeline = process_video(&config, &video_path, "test-job", false, None).await.unwrap();
 
         assert!(!timeline.segments.is_empty());
         assert_eq!(timeline.source, "test.mp4");
