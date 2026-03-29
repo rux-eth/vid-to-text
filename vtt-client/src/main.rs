@@ -1,5 +1,6 @@
 mod api;
 mod doctor;
+mod format;
 mod process;
 
 use std::path::PathBuf;
@@ -49,6 +50,20 @@ enum Commands {
 
     /// Check system dependencies and configuration
     Doctor,
+
+    /// Format a Timeline JSON file into human-readable Markdown via OpenAI
+    Format {
+        /// Path to Timeline JSON file
+        input: PathBuf,
+
+        /// Output path (default: input_formatted.md)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// OpenAI model override (default from config)
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 fn load_client_config() -> ClientConfig {
@@ -85,6 +100,9 @@ fn apply_cli_overrides(
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if present (for OPENAI_API_KEY etc.)
+    let _ = dotenvy::dotenv();
+
     let cli = Cli::parse();
     let mut config = load_client_config();
 
@@ -149,6 +167,23 @@ async fn main() {
         }
         Commands::Doctor => {
             doctor::run_doctor(&config).await;
+        }
+        Commands::Format {
+            input,
+            output,
+            model,
+        } => {
+            if let Err(e) = format::run_format(
+                &config.openai,
+                input,
+                output.as_deref(),
+                model.as_deref(),
+            )
+            .await
+            {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
