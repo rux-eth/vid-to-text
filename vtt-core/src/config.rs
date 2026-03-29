@@ -282,10 +282,17 @@ impl Default for OllamaConfig {
                 intervals. The frames are in chronological order and represent a continuous \
                 segment of video. Describe the visual content you observe: the setting, people, \
                 objects, actions, and any changes across the sequence. Be specific and concise. \
-                Focus on what is visually happening, not on speculating about audio or dialogue. \
-                When a character's mouth appears to be moving during speech from the transcript, \
-                identify them as the speaker. Track characters consistently across frames by their \
-                appearance (clothing, color, position)."
+                \
+                Guidelines: \
+                - Read and transcribe any visible text, titles, labels, captions, or graphics on screen. \
+                - Note facial expressions, body language, and emotional tone of characters. \
+                - Identify scene transitions, cuts, camera angle changes, or visual effects. \
+                - Describe spatial relationships: foreground, background, relative positions. \
+                - When a character's mouth appears to be moving during speech from the transcript, \
+                  identify them as the speaker. \
+                - Track characters consistently across frames by their appearance (clothing, color, position). \
+                - Note any inferences you can make from visual cues, but clearly distinguish \
+                  what you see from what you infer. Do not fabricate details that are not visible."
                 .to_string(),
             timeout_seconds: 300,
             num_ctx: 32768,
