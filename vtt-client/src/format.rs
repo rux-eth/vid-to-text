@@ -4,17 +4,8 @@ use serde::{Deserialize, Serialize};
 use vtt_core::{OpenAIConfig, Timeline};
 
 const DEFAULT_SYSTEM_PROMPT: &str = "\
-You are a video content formatter. Given a machine-readable JSON timeline \
-of a video containing speech transcripts, visual descriptions, and sound \
-events, produce a human-readable Markdown document with:\n\
-\n\
-1. A title derived from the source filename\n\
-2. A brief summary (2-3 sentences) of what the video is about\n\
-3. A detailed chronological transcript that weaves together speech, \
-visual descriptions, and sound events into a readable narrative\n\
-\n\
-Use timestamps as section markers. Indicate speaker dialogue with quotes. \
-Describe visual and sound events naturally within the narrative flow.";
+Format this video timeline JSON into a human-readable Markdown document \
+with a summary, character identification, and scene-by-scene transcript.";
 
 // --- OpenAI API types ---
 
@@ -179,7 +170,7 @@ mod tests {
     #[test]
     fn test_load_system_prompt_default() {
         let result = load_system_prompt(&None).unwrap();
-        assert!(result.contains("video content formatter"));
+        assert!(result.contains("Format this video timeline"));
     }
 
     #[test]
