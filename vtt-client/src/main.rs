@@ -1,6 +1,11 @@
-use clap::{Parser, Subcommand};
+mod api;
+mod doctor;
+mod process;
+
 use std::path::PathBuf;
-use vtt_core::{load_config, config_file_exists, config_file_path, ClientConfig};
+
+use clap::{Parser, Subcommand};
+use vtt_core::{load_config, ClientConfig};
 
 #[derive(Parser)]
 #[command(name = "vid-to-text", about = "Convert videos to structured text descriptions")]
@@ -43,7 +48,11 @@ fn load_client_config() -> ClientConfig {
     }
 }
 
-fn apply_cli_overrides(config: &mut ClientConfig, server: &Option<String>, output: &Option<PathBuf>) {
+fn apply_cli_overrides(
+    config: &mut ClientConfig,
+    server: &Option<String>,
+    output: &Option<PathBuf>,
+) {
     if let Some(srv) = server {
         if let Some((host, port_str)) = srv.rsplit_once(':') {
             if let Ok(port) = port_str.parse::<u16>() {
@@ -61,48 +70,18 @@ fn apply_cli_overrides(config: &mut ClientConfig, server: &Option<String>, outpu
     }
 }
 
-fn run_doctor(config: &ClientConfig) {
-    println!("vid-to-text doctor");
-    println!("==================");
-
-    // Config file status
-    let config_path = config_file_path("client.toml")
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    if config_file_exists("client.toml") {
-        println!("[ok] Config file found: {config_path}");
-    } else {
-        println!("[--] No config file at: {config_path} (using defaults)");
-    }
-
-    // Resolved config
-    println!();
-    println!("Resolved configuration:");
-    println!("  server.host = {}", config.server.host);
-    println!("  server.port = {}", config.server.port);
-    match &config.output.dir {
-        Some(dir) => println!("  output.dir  = {dir}"),
-        None => println!("  output.dir  = (alongside input file)"),
-    }
-    println!("  server_url  = {}", config.server_url());
-
-    // Validation
-    println!();
-    match config.validate() {
-        Ok(()) => println!("[ok] Config is valid"),
-        Err(e) => println!("[!!] Config validation error: {e}"),
-    }
-}
-
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-
     let mut config = load_client_config();
 
     match &cli.command {
-        Commands::Process { path, output, server, force } => {
+        Commands::Process {
+            path,
+            output,
+            server,
+            force: _,
+        } => {
             apply_cli_overrides(&mut config, server, output);
 
             if let Err(e) = config.validate() {
@@ -110,18 +89,35 @@ async fn main() {
                 std::process::exit(1);
             }
 
-            println!("Processing: {}", path.display());
-            println!("Server: {}", config.server_url());
-            if let Some(dir) = &config.output.dir {
-                println!("Output dir: {dir}");
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(
+                    config.polling.timeout_secs + 60,
+                ))
+                .build()
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: failed to create HTTP client: {e}");
+                    std::process::exit(1);
+                });
+
+            let result = if path.is_file() {
+                if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+                    eprintln!("Error: only mp4 files are supported");
+                    std::process::exit(1);
+                }
+                process::process_single_file(&client, &config, path).await
+            } else if path.is_dir() {
+                process::process_directory(&client, &config, path).await
+            } else {
+                Err(format!("{} not found", path.display()))
+            };
+
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
             }
-            if *force {
-                println!("Force reprocessing enabled");
-            }
-            // TODO: implement in PR-008
         }
         Commands::Doctor => {
-            run_doctor(&config);
+            doctor::run_doctor(&config).await;
         }
     }
 }

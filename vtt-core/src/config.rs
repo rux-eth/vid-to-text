@@ -10,6 +10,7 @@ use crate::VttError;
 pub struct ClientConfig {
     pub server: ClientServerConfig,
     pub output: ClientOutputConfig,
+    pub polling: ClientPollingConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,11 +26,28 @@ pub struct ClientOutputConfig {
     pub dir: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientPollingConfig {
+    pub poll_interval_secs: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for ClientPollingConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: 3,
+            timeout_secs: 1800,
+        }
+    }
+}
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             server: ClientServerConfig::default(),
             output: ClientOutputConfig::default(),
+            polling: ClientPollingConfig::default(),
         }
     }
 }
@@ -56,6 +74,16 @@ impl ClientConfig {
         }
         if self.server.port == 0 {
             return Err(VttError::Config("server.port must be greater than 0".into()));
+        }
+        if self.polling.poll_interval_secs == 0 {
+            return Err(VttError::Config(
+                "polling.poll_interval_secs must be greater than 0".into(),
+            ));
+        }
+        if self.polling.timeout_secs == 0 {
+            return Err(VttError::Config(
+                "polling.timeout_secs must be greater than 0".into(),
+            ));
         }
         Ok(())
     }
@@ -124,6 +152,7 @@ pub struct VisionConfig {
 #[serde(default)]
 pub struct ProcessingConfig {
     pub temp_dir: String,
+    pub max_upload_bytes: u64,
 }
 
 impl Default for ServerConfig {
@@ -208,6 +237,7 @@ impl Default for ProcessingConfig {
     fn default() -> Self {
         Self {
             temp_dir: "/tmp/vtt-jobs".to_string(),
+            max_upload_bytes: 4_294_967_296, // 4 GB
         }
     }
 }
@@ -482,6 +512,7 @@ max_frames_per_request = 500
 
 [processing]
 temp_dir = "/var/tmp/vtt"
+max_upload_bytes = 8589934592
 "#;
         let config: ServerConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen_address, "127.0.0.1");
@@ -505,6 +536,7 @@ temp_dir = "/var/tmp/vtt"
         assert_eq!(config.vision.max_tokens, 8192);
         assert_eq!(config.vision.max_frames_per_request, 500);
         assert_eq!(config.processing.temp_dir, "/var/tmp/vtt");
+        assert_eq!(config.processing.max_upload_bytes, 8589934592);
     }
 
     // --- Validation rejects bad values ---
@@ -677,5 +709,32 @@ listen_port = "not a number"
         let mut config = ServerConfig::default();
         config.vision.max_frames_per_request = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_polling_config_defaults() {
+        let config = ClientPollingConfig::default();
+        assert_eq!(config.poll_interval_secs, 3);
+        assert_eq!(config.timeout_secs, 1800);
+    }
+
+    #[test]
+    fn test_client_validation_rejects_zero_poll_interval() {
+        let mut config = ClientConfig::default();
+        config.polling.poll_interval_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validation_rejects_zero_timeout() {
+        let mut config = ClientConfig::default();
+        config.polling.timeout_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_max_upload_bytes_default() {
+        let config = ProcessingConfig::default();
+        assert_eq!(config.max_upload_bytes, 4_294_967_296);
     }
 }
