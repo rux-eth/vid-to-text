@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::io::ReaderStream;
 use vtt_core::{ClientConfig, Timeline};
 
@@ -150,6 +150,54 @@ pub async fn download_result(
     resp.json()
         .await
         .map_err(|e| format!("failed to parse timeline: {e}"))
+}
+
+#[derive(Debug, Serialize)]
+struct UrlJobRequestBody {
+    url: String,
+    #[serde(default)]
+    force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_fps: Option<u32>,
+}
+
+/// Submit a URL job to the server for download and processing.
+pub async fn submit_url_job(
+    client: &reqwest::Client,
+    server_url: &str,
+    url: &str,
+    force: bool,
+    max_resolution: Option<String>,
+    max_fps: Option<u32>,
+) -> Result<JobResponse, String> {
+    let body = UrlJobRequestBody {
+        url: url.to_string(),
+        force,
+        max_resolution,
+        max_fps,
+    };
+
+    let resp = client
+        .post(format!("{server_url}/jobs/url"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("failed to submit URL job: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body) {
+            return Err(format!("server error ({status}): {}", err.error));
+        }
+        return Err(format!("server error ({status}): {body}"));
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| format!("failed to parse job response: {e}"))
 }
 
 /// Fetch the server health status.

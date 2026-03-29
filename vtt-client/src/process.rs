@@ -82,6 +82,64 @@ pub async fn process_single_file(
     Ok(())
 }
 
+/// Process a YouTube URL: submit → poll → download result → write JSON.
+pub async fn process_url(
+    client: &reqwest::Client,
+    config: &ClientConfig,
+    url: &str,
+    force: bool,
+    max_resolution: Option<String>,
+    max_fps: Option<u32>,
+) -> Result<(), String> {
+    let server_url = config.server_url();
+
+    eprintln!("Submitting URL: {url}");
+    let job = api::submit_url_job(client, &server_url, url, force, max_resolution, max_fps).await?;
+    eprintln!("Job {} created", job.id);
+
+    // Poll until done
+    api::poll_until_done(client, &server_url, &job.id, url, config).await?;
+
+    // Download result
+    let timeline = api::download_result(client, &server_url, &job.id).await?;
+
+    // Derive output filename from source
+    let source_stem = std::path::Path::new(&timeline.source)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let json_name = format!("{source_stem}.json");
+
+    let output_path = match &config.output.dir {
+        Some(dir) => std::path::PathBuf::from(dir).join(&json_name),
+        None => std::path::PathBuf::from(&json_name),
+    };
+
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("failed to create output dir: {e}"))?;
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&timeline)
+        .map_err(|e| format!("failed to serialize timeline: {e}"))?;
+    tokio::fs::write(&output_path, &json)
+        .await
+        .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
+
+    eprintln!(
+        "Wrote {} ({} segments, {:.1}s duration)",
+        output_path.display(),
+        timeline.segments.len(),
+        timeline.duration_seconds
+    );
+
+    Ok(())
+}
+
 /// Process all mp4 files in a directory sequentially.
 pub async fn process_directory(
     client: &reqwest::Client,

@@ -35,7 +35,7 @@ Full PR descriptions live in `prs/`. This file is the index.
 
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
-| [PR-010](../prs/PR-010-checkpointing.md) | Chunk-level checkpointing and job resumability | `[ ]` | PR-008+009 |
+| [PR-010](../prs/PR-010-checkpointing.md) | Chunk-level checkpointing and job resumability | `[x]` | PR-008+009 |
 
 ---
 

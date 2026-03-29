@@ -104,6 +104,7 @@ pub struct ServerConfig {
     pub ollama: OllamaConfig,
     pub vision: VisionConfig,
     pub processing: ProcessingConfig,
+    pub ytdlp: YtDlpConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +159,26 @@ pub struct ProcessingConfig {
     pub cleanup_checkpoints: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YtDlpConfig {
+    pub path: String,
+    pub max_resolution: String,
+    pub max_fps: u32,
+    pub timeout_seconds: u64,
+}
+
+impl Default for YtDlpConfig {
+    fn default() -> Self {
+        Self {
+            path: "yt-dlp".to_string(),
+            max_resolution: "1080".to_string(),
+            max_fps: 30,
+            timeout_seconds: 600,
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -167,6 +188,7 @@ impl Default for ServerConfig {
             ollama: OllamaConfig::default(),
             vision: VisionConfig::default(),
             processing: ProcessingConfig::default(),
+            ytdlp: YtDlpConfig::default(),
         }
     }
 }
@@ -329,6 +351,19 @@ impl ServerConfig {
         if self.processing.temp_dir.is_empty() {
             return Err(VttError::Config(
                 "processing.temp_dir must not be empty".into(),
+            ));
+        }
+        if self.ytdlp.path.is_empty() {
+            return Err(VttError::Config("ytdlp.path must not be empty".into()));
+        }
+        if self.ytdlp.max_fps == 0 {
+            return Err(VttError::Config(
+                "ytdlp.max_fps must be greater than 0".into(),
+            ));
+        }
+        if self.ytdlp.timeout_seconds == 0 {
+            return Err(VttError::Config(
+                "ytdlp.timeout_seconds must be greater than 0".into(),
             ));
         }
         Ok(())
@@ -756,5 +791,28 @@ listen_port = "not a number"
     fn test_max_upload_bytes_default() {
         let config = ProcessingConfig::default();
         assert_eq!(config.max_upload_bytes, 4_294_967_296);
+    }
+
+    #[test]
+    fn test_ytdlp_config_defaults() {
+        let config = YtDlpConfig::default();
+        assert_eq!(config.path, "yt-dlp");
+        assert_eq!(config.max_resolution, "1080");
+        assert_eq!(config.max_fps, 30);
+        assert_eq!(config.timeout_seconds, 600);
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_ytdlp_fps() {
+        let mut config = ServerConfig::default();
+        config.ytdlp.max_fps = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_server_validation_rejects_zero_ytdlp_timeout() {
+        let mut config = ServerConfig::default();
+        config.ytdlp.timeout_seconds = 0;
+        assert!(config.validate().is_err());
     }
 }
