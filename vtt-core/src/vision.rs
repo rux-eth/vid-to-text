@@ -6,13 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{format_timestamp, Chunk, OllamaConfig, Segment, SegmentType, VisionConfig, VttError};
 
-const DEFAULT_PROMPT_TEMPLATE: &str = "\
-You are analyzing a sequence of video frames extracted at regular intervals. \
-The frames are in chronological order and represent a continuous segment of video. \
-Describe the visual content you observe: the setting, people, objects, actions, \
-and any changes across the sequence. Be specific and concise. \
-Focus on what is visually happening, not on speculating about audio or dialogue.";
-
 // --- Ollama API serde types ---
 
 #[derive(Debug, Serialize)]
@@ -79,7 +72,7 @@ impl OllamaClient {
             .build()
             .map_err(|e| VttError::Vision(format!("failed to create HTTP client: {e}")))?;
 
-        let prompt_template = load_prompt_template(&ollama_config.prompt_template_path)?;
+        let prompt_template = load_prompt_template(&ollama_config.prompt_template_path, &ollama_config.default_prompt)?;
 
         Ok(Self {
             client,
@@ -193,11 +186,11 @@ impl OllamaClient {
 }
 
 /// Load prompt template from file or return the default.
-fn load_prompt_template(path: &Option<String>) -> Result<String, VttError> {
+fn load_prompt_template(path: &Option<String>, default_prompt: &str) -> Result<String, VttError> {
     match path {
         Some(p) if !p.is_empty() => std::fs::read_to_string(p)
             .map_err(|e| VttError::Vision(format!("failed to read prompt template '{p}': {e}"))),
-        _ => Ok(DEFAULT_PROMPT_TEMPLATE.to_string()),
+        _ => Ok(default_prompt.to_string()),
     }
 }
 
@@ -279,22 +272,25 @@ mod tests {
     // --- Prompt template tests ---
 
     #[test]
-    fn test_default_prompt_template_not_empty() {
-        assert!(!DEFAULT_PROMPT_TEMPLATE.is_empty());
-        assert!(DEFAULT_PROMPT_TEMPLATE.contains("frames"));
-        assert!(DEFAULT_PROMPT_TEMPLATE.contains("visual"));
+    fn test_default_prompt_from_config_not_empty() {
+        let config = OllamaConfig::default();
+        assert!(!config.default_prompt.is_empty());
+        assert!(config.default_prompt.contains("frames"));
+        assert!(config.default_prompt.contains("visual"));
     }
 
     #[test]
     fn test_load_prompt_template_default() {
-        let result = load_prompt_template(&None).unwrap();
-        assert_eq!(result, DEFAULT_PROMPT_TEMPLATE);
+        let config = OllamaConfig::default();
+        let result = load_prompt_template(&None, &config.default_prompt).unwrap();
+        assert_eq!(result, config.default_prompt);
     }
 
     #[test]
     fn test_load_prompt_template_empty_string() {
-        let result = load_prompt_template(&Some(String::new())).unwrap();
-        assert_eq!(result, DEFAULT_PROMPT_TEMPLATE);
+        let config = OllamaConfig::default();
+        let result = load_prompt_template(&Some(String::new()), &config.default_prompt).unwrap();
+        assert_eq!(result, config.default_prompt);
     }
 
     #[test]
@@ -303,13 +299,13 @@ mod tests {
         let path = dir.path().join("prompt.txt");
         std::fs::write(&path, "Custom prompt template").unwrap();
 
-        let result = load_prompt_template(&Some(path.display().to_string())).unwrap();
+        let result = load_prompt_template(&Some(path.display().to_string()), "unused default").unwrap();
         assert_eq!(result, "Custom prompt template");
     }
 
     #[test]
     fn test_load_prompt_template_missing_file() {
-        let result = load_prompt_template(&Some("/nonexistent/prompt.txt".to_string()));
+        let result = load_prompt_template(&Some("/nonexistent/prompt.txt".to_string()), "unused default");
         assert!(result.is_err());
     }
 
