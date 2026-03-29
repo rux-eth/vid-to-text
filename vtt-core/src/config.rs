@@ -174,6 +174,7 @@ pub struct OllamaConfig {
     pub prompt_template_path: Option<String>,
     pub default_prompt: String,
     pub timeout_seconds: u64,
+    pub num_ctx: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,6 +285,7 @@ impl Default for OllamaConfig {
                 Focus on what is visually happening, not on speculating about audio or dialogue."
                 .to_string(),
             timeout_seconds: 300,
+            num_ctx: 32768,
         }
     }
 }
@@ -590,6 +592,7 @@ model = "qwen3-vl:latest"
 prompt_template_path = "/etc/vtt/prompt.txt"
 default_prompt = "Custom default prompt"
 timeout_seconds = 600
+num_ctx = 65536
 
 [vision]
 fps = 1.0
@@ -620,6 +623,7 @@ max_upload_bytes = 8589934592
         );
         assert_eq!(config.ollama.default_prompt, "Custom default prompt");
         assert_eq!(config.ollama.timeout_seconds, 600);
+        assert_eq!(config.ollama.num_ctx, 65536);
         assert_eq!(config.vision.fps, 1.0);
         assert_eq!(config.vision.max_tokens, 8192);
         assert_eq!(config.vision.max_frames_per_request, 500);
