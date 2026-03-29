@@ -282,7 +282,10 @@ impl Default for OllamaConfig {
                 intervals. The frames are in chronological order and represent a continuous \
                 segment of video. Describe the visual content you observe: the setting, people, \
                 objects, actions, and any changes across the sequence. Be specific and concise. \
-                Focus on what is visually happening, not on speculating about audio or dialogue."
+                Focus on what is visually happening, not on speculating about audio or dialogue. \
+                When a character's mouth appears to be moving during speech from the transcript, \
+                identify them as the speaker. Track characters consistently across frames by their \
+                appearance (clothing, color, position)."
                 .to_string(),
             timeout_seconds: 300,
             num_ctx: 32768,
