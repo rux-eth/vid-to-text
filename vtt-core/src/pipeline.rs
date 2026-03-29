@@ -2,62 +2,112 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
-    parse_timestamp, prepare_chunks, transcribe_chunk, OllamaClient,
-    Segment, SegmentType, ServerConfig, Timeline, VttError, WhisperModel,
+    clear_checkpoints, load_checkpoints, parse_timestamp, prepare_chunks, save_checkpoint,
+    transcribe_chunk, OllamaClient, Segment, SegmentType, ServerConfig, Timeline, VttError,
+    WhisperModel,
 };
 
 /// Process a video file through the full pipeline:
 /// chunk → Whisper (CPU) → Vision with transcript (GPU) → merge → Timeline.
 ///
 /// For each chunk, Whisper runs first so the transcript can be passed
-/// to the vision model as context.
+/// to the vision model as context. Completed chunks are checkpointed
+/// to disk for resumability. If `force` is true, existing checkpoints
+/// are cleared and all chunks are reprocessed.
 pub async fn process_video(
     config: &ServerConfig,
     video_path: &Path,
     job_id: &str,
+    force: bool,
 ) -> Result<Timeline, VttError> {
     config.validate()?;
 
     let manifest = prepare_chunks(config, video_path, job_id).await?;
-
-    let whisper_model = Arc::new(WhisperModel::new(&config.whisper)?);
-    let ollama_client = OllamaClient::new(&config.ollama, &config.vision)?;
 
     let source = video_path
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| video_path.display().to_string());
 
+    // Load or clear checkpoints
+    let cached = if force {
+        clear_checkpoints(&config.processing.temp_dir, job_id).await?;
+        std::collections::HashMap::new()
+    } else {
+        load_checkpoints(&config.processing.temp_dir, job_id).await?
+    };
+
+    let all_cached = cached.len() == manifest.chunks.len() && !manifest.chunks.is_empty();
+
+    // Only initialize models if there are uncached chunks to process
+    let whisper_model = if all_cached {
+        None
+    } else {
+        Some(Arc::new(WhisperModel::new(&config.whisper)?))
+    };
+
+    let ollama_client = if all_cached {
+        None
+    } else {
+        Some(OllamaClient::new(&config.ollama, &config.vision)?)
+    };
+
     let mut all_chunk_segments = Vec::new();
 
     for artifact in &manifest.chunks {
-        // Step 1: Whisper transcription (CPU, via spawn_blocking)
-        let whisper_segments = transcribe_chunk(
-            Arc::clone(&whisper_model),
-            artifact.audio_path.clone(),
-            artifact.chunk.clone(),
-        )
-        .await?;
+        let chunk_segments = if let Some(segments) = cached.get(&artifact.chunk.index) {
+            segments.clone()
+        } else {
+            let model = whisper_model.as_ref().unwrap();
+            let client = ollama_client.as_ref().unwrap();
 
-        // Step 2: Extract transcript for vision context
-        let transcript = extract_transcript(&whisper_segments);
-
-        // Step 3: Vision description (GPU, via Ollama HTTP)
-        let vision_segments = ollama_client
-            .describe_chunk(
-                &artifact.chunk,
-                &artifact.frame_paths,
-                transcript.as_deref(),
+            // Step 1: Whisper transcription (CPU, via spawn_blocking)
+            let whisper_segments = transcribe_chunk(
+                Arc::clone(model),
+                artifact.audio_path.clone(),
+                artifact.chunk.clone(),
             )
             .await?;
 
-        // Combine segments from both pipelines for this chunk
-        let mut chunk_segments = whisper_segments;
-        chunk_segments.extend(vision_segments);
+            // Step 2: Extract transcript for vision context
+            let transcript = extract_transcript(&whisper_segments);
+
+            // Step 3: Vision description (GPU, via Ollama HTTP)
+            let vision_segments = client
+                .describe_chunk(
+                    &artifact.chunk,
+                    &artifact.frame_paths,
+                    transcript.as_deref(),
+                )
+                .await?;
+
+            // Combine segments from both pipelines
+            let mut combined = whisper_segments;
+            combined.extend(vision_segments);
+
+            // Checkpoint only after both pipelines complete
+            save_checkpoint(
+                &config.processing.temp_dir,
+                job_id,
+                artifact.chunk.index,
+                &combined,
+            )
+            .await?;
+
+            combined
+        };
+
         all_chunk_segments.push(chunk_segments);
     }
 
-    Ok(merge_segments(&source, manifest.duration_seconds, all_chunk_segments))
+    let timeline = merge_segments(&source, manifest.duration_seconds, all_chunk_segments);
+
+    // Clean up checkpoints after successful merge
+    if config.processing.cleanup_checkpoints {
+        let _ = clear_checkpoints(&config.processing.temp_dir, job_id).await;
+    }
+
+    Ok(timeline)
 }
 
 /// Merge segments from all chunks into a single sorted Timeline.
@@ -142,7 +192,6 @@ mod tests {
         let sound = make_segment(SegmentType::Sound, 2.0, 2.5, "music");
         let timeline = merge_segments("v.mp4", 5.0, vec![vec![speech, visual, sound]]);
         assert_eq!(timeline.segments.len(), 3);
-        // Sorted by start: visual(0.0), speech(1.0), sound(2.0)
         assert_eq!(timeline.segments[0].segment_type, SegmentType::Visual);
         assert_eq!(timeline.segments[1].segment_type, SegmentType::Speech);
         assert_eq!(timeline.segments[2].segment_type, SegmentType::Sound);
@@ -150,12 +199,8 @@ mod tests {
 
     #[test]
     fn test_merge_multiple_chunks_sorted() {
-        let chunk1 = vec![
-            make_segment(SegmentType::Speech, 5.0, 8.0, "Later speech"),
-        ];
-        let chunk2 = vec![
-            make_segment(SegmentType::Speech, 1.0, 3.0, "Earlier speech"),
-        ];
+        let chunk1 = vec![make_segment(SegmentType::Speech, 5.0, 8.0, "Later speech")];
+        let chunk2 = vec![make_segment(SegmentType::Speech, 1.0, 3.0, "Earlier speech")];
         let timeline = merge_segments("v.mp4", 10.0, vec![chunk1, chunk2]);
         assert_eq!(timeline.segments.len(), 2);
         assert_eq!(timeline.segments[0].content, "Earlier speech");
@@ -183,7 +228,6 @@ mod tests {
         let seg2 = make_segment(SegmentType::Visual, 1.0, 5.0, "Visual");
         let timeline = merge_segments("v.mp4", 5.0, vec![vec![seg1, seg2]]);
         assert_eq!(timeline.segments.len(), 2);
-        // Both start at 1.0 — order is stable (Speech first since it was first in input)
     }
 
     #[test]
@@ -202,7 +246,6 @@ mod tests {
             .collect();
         let timeline = merge_segments("v.mp4", 500.0, vec![segments]);
         assert_eq!(timeline.segments.len(), 500);
-        // Verify sorted
         for i in 1..timeline.segments.len() {
             let prev = parse_timestamp(&timeline.segments[i - 1].start).unwrap();
             let curr = parse_timestamp(&timeline.segments[i].start).unwrap();
@@ -231,25 +274,19 @@ mod tests {
 
     #[test]
     fn test_extract_transcript_only_sound() {
-        let segments = vec![
-            make_segment(SegmentType::Sound, 0.0, 1.0, "music"),
-        ];
+        let segments = vec![make_segment(SegmentType::Sound, 0.0, 1.0, "music")];
         assert_eq!(extract_transcript(&segments), None);
     }
 
     #[test]
     fn test_extract_transcript_only_visual() {
-        let segments = vec![
-            make_segment(SegmentType::Visual, 0.0, 5.0, "A cat sits"),
-        ];
+        let segments = vec![make_segment(SegmentType::Visual, 0.0, 5.0, "A cat sits")];
         assert_eq!(extract_transcript(&segments), None);
     }
 
     #[test]
     fn test_extract_transcript_single_speech() {
-        let segments = vec![
-            make_segment(SegmentType::Speech, 0.0, 2.0, "Hello world"),
-        ];
+        let segments = vec![make_segment(SegmentType::Speech, 0.0, 2.0, "Hello world")];
         assert_eq!(extract_transcript(&segments), Some("Hello world".to_string()));
     }
 
@@ -307,20 +344,18 @@ mod tests {
             .status()
             .unwrap();
 
-        let timeline = process_video(&config, &video_path, "test-job").await.unwrap();
+        let timeline = process_video(&config, &video_path, "test-job", false).await.unwrap();
 
         assert!(!timeline.segments.is_empty());
         assert_eq!(timeline.source, "test.mp4");
         assert!(timeline.duration_seconds > 7.0);
 
-        // Verify sorted
         for i in 1..timeline.segments.len() {
             let prev = parse_timestamp(&timeline.segments[i - 1].start).unwrap();
             let curr = parse_timestamp(&timeline.segments[i].start).unwrap();
             assert!(prev <= curr);
         }
 
-        // Should have at least one visual segment
         assert!(timeline
             .segments
             .iter()
