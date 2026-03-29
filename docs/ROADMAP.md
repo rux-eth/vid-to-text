@@ -22,7 +22,7 @@ Full PR descriptions live in `prs/`. This file is the index.
 | PR-003 | ffmpeg video chunking — split mp4 into time-based chunks | `[x]` | PR-002 |
 | PR-004 | Whisper pipeline — audio extraction and speech transcription on CPU | `[x]` | PR-003 |
 | PR-005 | Qwen3-VL pipeline — frame extraction and visual description via Ollama | `[x]` | PR-003 |
-| [PR-006](../prs/PR-006-timeline-merge.md) | Timeline merge — combine segments from both pipelines, sort, produce JSON | `[ ]` | PR-004, PR-005 |
+| PR-006 | Timeline merge — combine segments from both pipelines, sort, produce JSON | `[x]` | PR-004, PR-005 |
 
 ## Phase 3: Client-Server Communication
 
