@@ -7,7 +7,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = "\
 Format this video timeline JSON into a human-readable Markdown document \
 with a summary, character identification, and scene-by-scene transcript.";
 
-// --- OpenAI API types ---
+// --- Chat Completions API types ---
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -32,6 +32,41 @@ struct Choice {
     message: ChatMessage,
 }
 
+// --- Responses API types (for stored prompts) ---
+
+#[derive(Debug, Serialize)]
+struct ResponsesRequest {
+    model: String,
+    prompt: PromptRef,
+    input: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptRef {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesResponse {
+    output: Vec<ResponsesOutput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesOutput {
+    #[serde(rename = "type")]
+    output_type: String,
+    #[serde(default)]
+    content: Vec<ResponsesContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    text: String,
+}
+
 /// Compute the output path for a formatted file.
 pub fn compute_format_output_path(input_path: &Path) -> PathBuf {
     let stem = input_path
@@ -50,24 +85,23 @@ fn load_system_prompt(path: &Option<String>) -> Result<String, String> {
     }
 }
 
-/// Format a Timeline JSON file into human-readable Markdown via OpenAI API.
+/// Format a Timeline JSON file via OpenAI.
+/// Uses Responses API if prompt_id is provided, Chat Completions otherwise.
 pub async fn run_format(
     config: &OpenAIConfig,
     input_path: &Path,
     output_path: Option<&Path>,
     model_override: Option<&str>,
     prompt_override: Option<&Path>,
+    prompt_id: Option<&str>,
 ) -> Result<(), String> {
-    // Load API key from env
     let api_key = std::env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY not set — add it to .env or set as environment variable".to_string())?;
 
-    // Read Timeline JSON
     let json_str = tokio::fs::read_to_string(input_path)
         .await
         .map_err(|e| format!("failed to read {}: {e}", input_path.display()))?;
 
-    // Validate it parses as Timeline
     let timeline: Timeline = serde_json::from_str(&json_str)
         .map_err(|e| format!("invalid Timeline JSON: {e}"))?;
 
@@ -78,34 +112,70 @@ pub async fn run_format(
         timeline.duration_seconds
     );
 
-    // Load system prompt — CLI flag overrides config, config overrides default
-    let prompt_path = prompt_override
-        .map(|p| Some(p.display().to_string()))
-        .unwrap_or(config.format_prompt_path.clone());
-    let system_prompt = load_system_prompt(&prompt_path)?;
-
     let model = model_override.unwrap_or(&config.model).to_string();
+    let client = reqwest::Client::new();
 
-    // Build request
+    let content = if let Some(pid) = prompt_id {
+        // Responses API with stored prompt
+        eprintln!("Using stored prompt: {pid}");
+        call_responses_api(&client, &api_key, &model, pid, &json_str).await?
+    } else {
+        // Chat Completions API with local/config prompt
+        let prompt_path = prompt_override
+            .map(|p| Some(p.display().to_string()))
+            .unwrap_or(config.format_prompt_path.clone());
+        let system_prompt = load_system_prompt(&prompt_path)?;
+        call_chat_api(&client, &api_key, &model, &system_prompt, &json_str, config.max_tokens).await?
+    };
+
+    // Write output
+    let out_path = output_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| compute_format_output_path(input_path));
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("failed to create output dir: {e}"))?;
+        }
+    }
+
+    tokio::fs::write(&out_path, &content)
+        .await
+        .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
+
+    eprintln!("Wrote {} (model: {model})", out_path.display());
+
+    Ok(())
+}
+
+/// Call the Chat Completions API with a system prompt + user message.
+async fn call_chat_api(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    user_content: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
     let request = ChatRequest {
-        model: model.clone(),
+        model: model.to_string(),
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: system_prompt,
+                content: system_prompt.to_string(),
             },
             ChatMessage {
                 role: "user".to_string(),
-                content: json_str,
+                content: user_content.to_string(),
             },
         ],
-        max_completion_tokens: config.max_tokens,
+        max_completion_tokens: max_tokens,
     };
 
-    // Call OpenAI API
-    let client = reqwest::Client::new();
     let resp = client
-        .post(&config.endpoint)
+        .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&request)
         .send()
@@ -133,26 +203,60 @@ pub async fn run_format(
         return Err("OpenAI returned empty content".to_string());
     }
 
-    // Write output
-    let out_path = output_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| compute_format_output_path(input_path));
+    Ok(content)
+}
 
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("failed to create output dir: {e}"))?;
-        }
+/// Call the Responses API with a stored prompt ID.
+async fn call_responses_api(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    prompt_id: &str,
+    input: &str,
+) -> Result<String, String> {
+    let request = ResponsesRequest {
+        model: model.to_string(),
+        prompt: PromptRef {
+            id: prompt_id.to_string(),
+        },
+        input: input.to_string(),
+    };
+
+    let resp = client
+        .post("https://api.openai.com/v1/responses")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("OpenAI Responses API request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("OpenAI Responses API error ({status}): {body}"));
     }
 
-    tokio::fs::write(&out_path, &content)
+    let responses: ResponsesResponse = resp
+        .json()
         .await
-        .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
+        .map_err(|e| format!("failed to parse Responses API response: {e}"))?;
 
-    eprintln!("Wrote {} (model: {model})", out_path.display());
+    // Extract text from the message output (skip reasoning blocks)
+    let content = responses
+        .output
+        .iter()
+        .filter(|o| o.output_type == "message")
+        .flat_map(|o| o.content.iter())
+        .filter(|c| c.content_type == "output_text")
+        .map(|c| c.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
 
-    Ok(())
+    if content.is_empty() {
+        return Err("OpenAI Responses API returned empty content".to_string());
+    }
+
+    Ok(content)
 }
 
 #[cfg(test)]
@@ -215,10 +319,38 @@ mod tests {
     }
 
     #[test]
+    fn test_responses_request_serialization() {
+        let request = ResponsesRequest {
+            model: "gpt-5.4".to_string(),
+            prompt: PromptRef {
+                id: "pmpt_abc123".to_string(),
+            },
+            input: "hello".to_string(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["model"], "gpt-5.4");
+        assert_eq!(json["prompt"]["id"], "pmpt_abc123");
+        assert_eq!(json["input"], "hello");
+    }
+
+    #[test]
     fn test_chat_response_parsing() {
         let json = r##"{"choices":[{"message":{"role":"assistant","content":"# Formatted output"}}]}"##;
         let resp: ChatResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.choices.len(), 1);
         assert_eq!(resp.choices[0].message.content, "# Formatted output");
+    }
+
+    #[test]
+    fn test_responses_response_parsing() {
+        let json = r#"{"output":[{"type":"reasoning","content":[]},{"type":"message","content":[{"type":"output_text","text":"here are my questions"}]}]}"#;
+        let resp: ResponsesResponse = serde_json::from_str(json).unwrap();
+        let text: Vec<_> = resp.output.iter()
+            .filter(|o| o.output_type == "message")
+            .flat_map(|o| o.content.iter())
+            .filter(|c| c.content_type == "output_text")
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(text, vec!["here are my questions"]);
     }
 }
