@@ -13,7 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use vtt_core::{
-    check_ffmpeg, load_config, process_video, JobStatus, OllamaClient, ServerConfig, Timeline,
+    check_ffmpeg, check_ytdlp, download_video, load_config, process_video, JobStatus,
+    OllamaClient, ServerConfig, Timeline,
 };
 
 // --- Request/Response types ---
@@ -23,6 +24,15 @@ struct CreateJobRequest {
     source: String,
     #[serde(default)]
     force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UrlJobRequest {
+    url: String,
+    #[serde(default)]
+    force: bool,
+    max_resolution: Option<String>,
+    max_fps: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,7 +149,15 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         Err(e) => json!({ "error": e.to_string() }),
     };
 
-    let overall = if ffmpeg_status.get("error").is_none() && ollama_status == json!("ok") {
+    let ytdlp_status = match check_ytdlp(&state.config.ytdlp).await {
+        Ok(version) => json!({ "version": version }),
+        Err(e) => json!({ "error": e.to_string() }),
+    };
+
+    let overall = if ffmpeg_status.get("error").is_none()
+        && ollama_status == json!("ok")
+        && ytdlp_status.get("error").is_none()
+    {
         "ok"
     } else {
         "degraded"
@@ -149,6 +167,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "status": overall,
         "ffmpeg": ffmpeg_status,
         "ollama": ollama_status,
+        "ytdlp": ytdlp_status,
     }))
 }
 
@@ -274,6 +293,115 @@ async fn upload_job(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
+async fn create_url_job(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<UrlJobRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if request.url.is_empty() {
+        return Err(ApiError::BadRequest("url must not be empty".into()));
+    }
+
+    let job_id = Uuid::new_v4();
+    let entry = JobEntry {
+        id: job_id,
+        source: request.url.clone(),
+        status: JobStatus::Queued,
+        error: None,
+    };
+    let response = entry.to_response();
+
+    {
+        let mut jobs = state.jobs.lock().unwrap();
+        jobs.insert(job_id, entry);
+    }
+
+    // Spawn background: download then process
+    let state_clone = Arc::clone(&state);
+    let url = request.url.clone();
+    let force = request.force;
+    let max_resolution = request.max_resolution.clone();
+    let max_fps = request.max_fps;
+
+    tokio::spawn(async move {
+        let _permit = state_clone.processing_semaphore.acquire().await.unwrap();
+
+        {
+            let mut jobs = state_clone.jobs.lock().unwrap();
+            if let Some(entry) = jobs.get_mut(&job_id) {
+                entry.status = JobStatus::Processing;
+            }
+        }
+
+        let job_id_str = job_id.to_string();
+        let download_dir = std::path::PathBuf::from(&state_clone.config.processing.temp_dir)
+            .join(&job_id_str);
+
+        // Download video
+        let download_result = download_video(
+            &state_clone.config.ytdlp,
+            &url,
+            &download_dir,
+            max_resolution.as_deref(),
+            max_fps,
+        )
+        .await;
+
+        let download = match download_result {
+            Ok(d) => d,
+            Err(e) => {
+                let mut jobs = state_clone.jobs.lock().unwrap();
+                if let Some(entry) = jobs.get_mut(&job_id) {
+                    entry.status = JobStatus::Failed;
+                    entry.error = Some(e.to_string());
+                }
+                return;
+            }
+        };
+
+        // Update source to video title
+        {
+            let mut jobs = state_clone.jobs.lock().unwrap();
+            if let Some(entry) = jobs.get_mut(&job_id) {
+                entry.source = format!("{}.mp4", download.title);
+            }
+        }
+
+        // Process video
+        let source_name = format!("{}.mp4", download.title);
+        match process_video(
+            &state_clone.config,
+            &download.video_path,
+            &job_id_str,
+            force,
+            Some(&source_name),
+        )
+        .await
+        {
+            Ok(timeline) => {
+                {
+                    let mut results = state_clone.results.lock().unwrap();
+                    results.insert(job_id, timeline);
+                }
+                {
+                    let mut jobs = state_clone.jobs.lock().unwrap();
+                    if let Some(entry) = jobs.get_mut(&job_id) {
+                        entry.status = JobStatus::Completed;
+                    }
+                }
+            }
+            Err(e) => {
+                let mut jobs = state_clone.jobs.lock().unwrap();
+                if let Some(entry) = jobs.get_mut(&job_id) {
+                    entry.status = JobStatus::Failed;
+                    entry.error = Some(e.to_string());
+                }
+            }
+        }
+    });
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
 async fn get_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -352,6 +480,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/jobs", post(create_job))
         .route("/jobs/upload", post(upload_job))
+        .route("/jobs/url", post(create_url_job))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/result", get(get_job_result))
         .layer(DefaultBodyLimit::max(max_upload))

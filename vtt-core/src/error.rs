@@ -25,4 +25,7 @@ pub enum VttError {
 
     #[error("client error: {0}")]
     Client(String),
+
+    #[error("download error: {0}")]
+    Download(String),
 }
