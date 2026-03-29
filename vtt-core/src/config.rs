@@ -295,7 +295,7 @@ impl Default for OllamaConfig {
                   what you see from what you infer. Do not fabricate details that are not visible."
                 .to_string(),
             timeout_seconds: 300,
-            num_ctx: 32768,
+            num_ctx: 65536,
         }
     }
 }
