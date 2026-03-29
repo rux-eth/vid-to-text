@@ -54,3 +54,53 @@ Evaluated Video-LLaVA (outdated, 8 frames only), InternVideo2.5 (capable but hea
 - Added domain constraints to CONSTRAINTS.md
 - Created PR plan in ROADMAP.md
 - Created PR description files in prs/
+
+## Session: 2026-03-29 — Post-v1 Enhancements & Optimization
+
+### Context
+
+v1 complete and system-tested. Session focused on post-v1 features, quality improvements, and performance optimization through iterative testing with real YouTube videos.
+
+### Decisions
+
+1. **YouTube URL support (PR-011)**: Server downloads via yt-dlp, client sends `--url` flag. Configurable resolution/FPS.
+   **Rationale**: User shouldn't need to manually download videos.
+
+2. **Human-readable format command (PR-012)**: GPT-5.4 via OpenAI API produces Markdown from JSON. Separate `format` subcommand runs client-side.
+   **Rationale**: Machine-readable JSON needs a presentation layer. Separate command allows re-formatting without reprocessing.
+
+3. **Q8 Instruct model over Q4 Thinking (PR-013)**: Switched from `qwen3-vl:8b` (Q4_K_M, Thinking) to `qwen3-vl:8b-instruct-q8_0`. 3x more reliable, faster per batch, no empty response issues.
+   **Rationale**: Q4 Thinking variant produced empty responses non-deterministically. Q8 Instruct uses more VRAM (20GB/24GB) but eliminates the problem.
+
+4. **Granular visual segments (PR-013)**: One visual segment per batch (~7.5s) instead of one per chunk (3min). Went from 2 to 28 visual segments.
+   **Rationale**: Fine-grained timestamps correlate better with speech for the format command.
+
+5. **Overlapped processing (PR-014)**: Pre-spawn Whisper(N+1) on CPU while Vision(N) runs on GPU. Cross-chunk context passed to vision prompt.
+   **Rationale**: Whisper is free when overlapped. Cross-chunk context prevents vision model from losing continuity at chunk boundaries.
+
+6. **Release build**: Whisper 2.6x faster in release vs debug (45s vs 118s for 3-min chunk).
+   **Rationale**: Free performance win for CPU-bound work.
+
+7. **CRISPE prompt framework (PR-015)**: Prompts externalized to `prompts/vision.txt` and `prompts/format.txt`. Structured with Context, Role, Instruction, Specification, Parameters, Examples.
+   **Rationale**: Prompts were too long for source code. CRISPE produces robust, situation-agnostic prompts. Editing prompts no longer requires recompilation.
+
+8. **num_ctx=65536**: Increased Ollama context window from default to 65536. Enables reliable multi-image requests.
+   **Rationale**: Default context window caused empty responses with 15+ images.
+
+### Performance summary (3.5 min TED-Ed video)
+
+| Stage | First run | Final run |
+|-------|-----------|-----------|
+| Whisper (chunk_0) | 125s (debug) | 45s (release) |
+| Vision (chunk_0) | 648s (Q4) | 639s (Q8 + CRISPE) |
+| Total | 883s | 790s |
+
+### Quality improvements
+- Vision: spatial storytelling, character tracking, OCR, expression analysis
+- Format: scene-based grouping, character identification with confidence, narrator attribution
+- Tested on animation (TED-Ed) and live chart analysis (crypto) — both produce high-quality output
+
+### Changes to docs
+- Updated CLAUDE.md with CLI usage, key config, Q8 model recommendation
+- Updated ARCHITECTURE.md with sequential Whisper→Vision flow
+- Updated ROADMAP.md with Phase 5 post-v1 PRs
