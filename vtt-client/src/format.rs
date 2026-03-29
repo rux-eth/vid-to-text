@@ -211,7 +211,7 @@ mod tests {
                     content: "Format this.".to_string(),
                 },
             ],
-            max_tokens: 4096,
+            max_completion_tokens: 4096,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["model"], "gpt-5.4");

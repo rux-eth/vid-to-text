@@ -67,32 +67,67 @@ pub async fn process_video(
     };
 
     let mut all_chunk_segments = Vec::new();
+    let mut prev_context: Option<String> = None;
+    let mut pending_whisper: Option<
+        tokio::task::JoinHandle<Result<Vec<Segment>, VttError>>,
+    > = None;
 
-    for artifact in &manifest.chunks {
+    for (i, artifact) in manifest.chunks.iter().enumerate() {
         let chunk_start = Instant::now();
         let ci = artifact.chunk.index;
 
         let chunk_segments = if let Some(segments) = cached.get(&artifact.chunk.index) {
             eprintln!("[timing] chunk_{ci}: loaded from checkpoint");
+            // Build context from cached segments for next chunk
+            let whisper_segs: Vec<_> = segments
+                .iter()
+                .filter(|s| s.segment_type == SegmentType::Speech)
+                .cloned()
+                .collect();
+            let vision_segs: Vec<_> = segments
+                .iter()
+                .filter(|s| s.segment_type == SegmentType::Visual)
+                .cloned()
+                .collect();
+            prev_context = Some(build_chunk_context(&whisper_segs, &vision_segs));
             segments.clone()
         } else {
             let model = whisper_model.as_ref().unwrap();
             let client = ollama_client.as_ref().unwrap();
 
-            // Step 1: Whisper transcription (CPU, via spawn_blocking)
+            // Step 1: Get Whisper result — from pre-spawned task or run now
             let t = Instant::now();
-            let whisper_segments = transcribe_chunk(
-                Arc::clone(model),
-                artifact.audio_path.clone(),
-                artifact.chunk.clone(),
-            )
-            .await?;
+            let whisper_segments = if let Some(handle) = pending_whisper.take() {
+                handle
+                    .await
+                    .map_err(|e| VttError::Whisper(format!("whisper task panicked: {e}")))?
+                    ?
+            } else {
+                transcribe_chunk(
+                    Arc::clone(model),
+                    artifact.audio_path.clone(),
+                    artifact.chunk.clone(),
+                )
+                .await?
+            };
             eprintln!("[timing] chunk_{ci} whisper: {:.1}s ({} segments)", t.elapsed().as_secs_f64(), whisper_segments.len());
 
             // Step 2: Extract transcript for vision context
             let transcript = extract_transcript(&whisper_segments);
 
-            // Step 3: Vision description (GPU, via Ollama HTTP)
+            // Step 3: Pre-spawn Whisper for next chunk while Vision runs
+            if let Some(next) = manifest.chunks.get(i + 1) {
+                if !cached.contains_key(&next.chunk.index) {
+                    let next_model = Arc::clone(model);
+                    let next_audio = next.audio_path.clone();
+                    let next_chunk = next.chunk.clone();
+                    pending_whisper = Some(tokio::spawn(async move {
+                        transcribe_chunk(next_model, next_audio, next_chunk).await
+                    }));
+                }
+            }
+
+            // Step 4: Vision description (GPU, via Ollama HTTP) with cross-chunk context
             let t = Instant::now();
             let vision_segments = client
                 .describe_chunk(
@@ -100,10 +135,14 @@ pub async fn process_video(
                     &artifact.frame_paths,
                     transcript.as_deref(),
                     config.vision.fps,
+                    prev_context.as_deref(),
                 )
                 .await?;
             let n_batches = (artifact.frame_paths.len() + config.vision.max_frames_per_request as usize - 1) / config.vision.max_frames_per_request as usize;
             eprintln!("[timing] chunk_{ci} vision: {:.1}s ({} frames, {} batches, {} segments)", t.elapsed().as_secs_f64(), artifact.frame_paths.len(), n_batches, vision_segments.len());
+
+            // Build context for next chunk
+            prev_context = Some(build_chunk_context(&whisper_segments, &vision_segments));
 
             // Combine segments from both pipelines
             let mut combined = whisper_segments;
@@ -175,6 +214,43 @@ pub fn extract_transcript(segments: &[Segment]) -> Option<String> {
     } else {
         Some(speech.join(" "))
     }
+}
+
+/// Build a context summary from a chunk's segments for the next chunk's vision prompt.
+/// Includes the last ~30s of speech and the last visual description.
+pub fn build_chunk_context(
+    whisper_segments: &[Segment],
+    vision_segments: &[Segment],
+) -> String {
+    let mut parts = Vec::new();
+
+    // Last few speech segments (roughly last 30s worth)
+    let speech: Vec<&str> = whisper_segments
+        .iter()
+        .filter(|s| s.segment_type == SegmentType::Speech && !s.content.trim().is_empty())
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|s| s.content.as_str())
+        .collect();
+
+    if !speech.is_empty() {
+        parts.push(format!("Recent dialogue: {}", speech.join(" ")));
+    }
+
+    // Last visual description (truncated)
+    if let Some(last_visual) = vision_segments.last() {
+        let desc = if last_visual.content.len() > 200 {
+            format!("{}...", &last_visual.content[..200])
+        } else {
+            last_visual.content.clone()
+        };
+        parts.push(format!("Last visual: {desc}"));
+    }
+
+    parts.join(" ")
 }
 
 /// Helper to create a Segment for use in tests.
@@ -343,6 +419,39 @@ mod tests {
             make_segment(SegmentType::Speech, 1.0, 2.0, "Hello"),
         ];
         assert_eq!(extract_transcript(&segments), Some("Hello".to_string()));
+    }
+
+    // --- build_chunk_context tests ---
+
+    #[test]
+    fn test_build_chunk_context_with_speech_and_visual() {
+        let whisper = vec![
+            make_segment(SegmentType::Speech, 0.0, 5.0, "Hello world"),
+            make_segment(SegmentType::Speech, 5.0, 10.0, "How are you"),
+        ];
+        let vision = vec![
+            make_segment(SegmentType::Visual, 0.0, 10.0, "A man stands in a park"),
+        ];
+        let ctx = build_chunk_context(&whisper, &vision);
+        assert!(ctx.contains("Hello world"));
+        assert!(ctx.contains("How are you"));
+        assert!(ctx.contains("A man stands in a park"));
+    }
+
+    #[test]
+    fn test_build_chunk_context_empty() {
+        let ctx = build_chunk_context(&[], &[]);
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_build_chunk_context_truncates_long_visual() {
+        let vision = vec![
+            make_segment(SegmentType::Visual, 0.0, 10.0, &"x".repeat(500)),
+        ];
+        let ctx = build_chunk_context(&[], &vision);
+        assert!(ctx.len() < 300);
+        assert!(ctx.contains("..."));
     }
 
     // --- Integration tests (require ffmpeg + Whisper model + Ollama) ---

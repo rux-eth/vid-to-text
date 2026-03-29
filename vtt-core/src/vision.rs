@@ -128,6 +128,7 @@ impl OllamaClient {
     /// Describe the visual content of a chunk's frames.
     /// If a transcript is provided, it is included in the prompt so the vision
     /// model can relate visual content to what was said/heard.
+    /// If previous_context is provided, it gives the model continuity from the prior chunk.
     /// Returns one Visual segment per batch of frames for fine-grained temporal resolution.
     pub async fn describe_chunk(
         &self,
@@ -135,12 +136,13 @@ impl OllamaClient {
         frame_paths: &[PathBuf],
         transcript: Option<&str>,
         fps: f32,
+        previous_context: Option<&str>,
     ) -> Result<Vec<Segment>, VttError> {
         if frame_paths.is_empty() {
             return Ok(Vec::new());
         }
 
-        let prompt = build_prompt(&self.prompt_template, transcript);
+        let prompt = build_prompt(&self.prompt_template, transcript, previous_context);
         let encoded = encode_frames_base64(frame_paths).await?;
         let batch_size = self.max_frames_per_request as usize;
         let seconds_per_frame = 1.0 / fps as f64;
@@ -228,18 +230,34 @@ fn load_prompt_template(path: &Option<String>, default_prompt: &str) -> Result<S
     }
 }
 
-/// Build the full prompt by combining the template with an optional transcript.
-fn build_prompt(template: &str, transcript: Option<&str>) -> String {
-    match transcript {
-        Some(t) if !t.trim().is_empty() => {
-            format!(
-                "{template}\n\nAudio transcript for this segment:\n\"{t}\"\n\n\
+/// Build the full prompt by combining the template with optional context and transcript.
+fn build_prompt(
+    template: &str,
+    transcript: Option<&str>,
+    previous_context: Option<&str>,
+) -> String {
+    let mut prompt = template.to_string();
+
+    if let Some(ctx) = previous_context {
+        if !ctx.trim().is_empty() {
+            prompt.push_str(&format!(
+                "\n\nContext from previous segment:\n\"{ctx}\"\n\
+                 Maintain continuity with what was previously described."
+            ));
+        }
+    }
+
+    if let Some(t) = transcript {
+        if !t.trim().is_empty() {
+            prompt.push_str(&format!(
+                "\n\nAudio transcript for this segment:\n\"{t}\"\n\n\
                  Use this transcript as context to enrich your visual description. \
                  Note how the visual content relates to what is being said or heard."
-            )
+            ));
         }
-        _ => template.to_string(),
     }
+
+    prompt
 }
 
 /// Read JPEG/PNG files and encode them as base64 strings.
@@ -502,13 +520,13 @@ mod tests {
 
     #[test]
     fn test_build_prompt_without_transcript() {
-        let result = build_prompt("Describe the scene.", None);
+        let result = build_prompt("Describe the scene.", None, None);
         assert_eq!(result, "Describe the scene.");
     }
 
     #[test]
     fn test_build_prompt_with_transcript() {
-        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."));
+        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."), None);
         assert!(result.contains("Describe the scene."));
         assert!(result.contains("Hello, welcome to the show."));
         assert!(result.contains("Audio transcript"));
@@ -516,8 +534,24 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_empty_transcript() {
-        let result = build_prompt("Describe the scene.", Some("   "));
+        let result = build_prompt("Describe the scene.", Some("   "), None);
         assert_eq!(result, "Describe the scene.");
+    }
+
+    #[test]
+    fn test_build_prompt_with_previous_context() {
+        let result = build_prompt("Describe.", Some("Hello."), Some("A man waved goodbye."));
+        assert!(result.contains("Describe."));
+        assert!(result.contains("A man waved goodbye."));
+        assert!(result.contains("Hello."));
+        assert!(result.contains("Context from previous segment"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_context_no_transcript() {
+        let result = build_prompt("Describe.", None, Some("A man waved goodbye."));
+        assert!(result.contains("A man waved goodbye."));
+        assert!(!result.contains("Audio transcript"));
     }
 
     // --- Integration tests (require Ollama running with qwen3-vl:8b) ---
@@ -551,7 +585,7 @@ mod tests {
             end_seconds: 3.0,
         };
 
-        let segments = client.describe_chunk(&chunk, &[frame_path], None, 2.0).await.unwrap();
+        let segments = client.describe_chunk(&chunk, &[frame_path], None, 2.0, None).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());
