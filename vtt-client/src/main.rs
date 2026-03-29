@@ -63,6 +63,10 @@ enum Commands {
         /// OpenAI model override (default from config)
         #[arg(long)]
         model: Option<String>,
+
+        /// Custom system prompt file (overrides config and default)
+        #[arg(short, long)]
+        prompt: Option<PathBuf>,
     },
 }
 
@@ -172,12 +176,14 @@ async fn main() {
             input,
             output,
             model,
+            prompt,
         } => {
             if let Err(e) = format::run_format(
                 &config.openai,
                 input,
                 output.as_deref(),
                 model.as_deref(),
+                prompt.as_deref(),
             )
             .await
             {

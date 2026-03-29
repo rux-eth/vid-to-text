@@ -56,6 +56,7 @@ pub async fn run_format(
     input_path: &Path,
     output_path: Option<&Path>,
     model_override: Option<&str>,
+    prompt_override: Option<&Path>,
 ) -> Result<(), String> {
     // Load API key from env
     let api_key = std::env::var("OPENAI_API_KEY")
@@ -77,8 +78,11 @@ pub async fn run_format(
         timeline.duration_seconds
     );
 
-    // Load system prompt
-    let system_prompt = load_system_prompt(&config.format_prompt_path)?;
+    // Load system prompt — CLI flag overrides config, config overrides default
+    let prompt_path = prompt_override
+        .map(|p| Some(p.display().to_string()))
+        .unwrap_or(config.format_prompt_path.clone());
+    let system_prompt = load_system_prompt(&prompt_path)?;
 
     let model = model_override.unwrap_or(&config.model).to_string();
 
