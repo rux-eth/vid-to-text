@@ -260,7 +260,7 @@ impl Default for VisionConfig {
         Self {
             fps: 2.0,
             max_tokens: 4096,
-            max_frames_per_request: 360,
+            max_frames_per_request: 15,
         }
     }
 }
@@ -749,7 +749,7 @@ listen_port = "not a number"
     #[test]
     fn test_vision_max_frames_default() {
         let config = VisionConfig::default();
-        assert_eq!(config.max_frames_per_request, 360);
+        assert_eq!(config.max_frames_per_request, 15);
     }
 
     #[test]

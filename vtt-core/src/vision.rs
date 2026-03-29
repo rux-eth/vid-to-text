@@ -246,13 +246,25 @@ fn parse_vision_response(body: &str) -> Result<String, VttError> {
     let resp: OllamaChatResponse = serde_json::from_str(body)
         .map_err(|e| VttError::Vision(format!("failed to parse Ollama response: {e}")))?;
 
-    let content = strip_thinking_tags(&resp.message.content);
-
-    if content.is_empty() {
+    let full_content = resp.message.content.trim();
+    if full_content.is_empty() {
         return Err(VttError::Vision("Ollama returned empty content".into()));
     }
 
-    Ok(content.to_string())
+    let stripped = strip_thinking_tags(full_content);
+
+    // If stripping thinking tags leaves nothing, extract the thinking content itself
+    if stripped.is_empty() {
+        if let (Some(start), Some(end)) = (full_content.find("<think>"), full_content.find("</think>")) {
+            let thinking = full_content[start + "<think>".len()..end].trim();
+            if !thinking.is_empty() {
+                return Ok(thinking.to_string());
+            }
+        }
+        return Err(VttError::Vision("Ollama returned empty content".into()));
+    }
+
+    Ok(stripped.to_string())
 }
 
 /// Strip `<think>...</think>` tags from Qwen3-VL Thinking mode output.
@@ -363,8 +375,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_vision_response_thinking_only() {
-        let body = r#"{"message":{"role":"assistant","content":"<think>Just thinking...</think>   "}}"#;
+    fn test_parse_vision_response_thinking_only_with_content() {
+        let body = r#"{"message":{"role":"assistant","content":"<think>The scene shows a cat on a windowsill.</think>   "}}"#;
+        let result = parse_vision_response(body).unwrap();
+        assert_eq!(result, "The scene shows a cat on a windowsill.");
+    }
+
+    fn test_parse_vision_response_thinking_empty() {
+        let body = r#"{"message":{"role":"assistant","content":"<think>   </think>   "}}"#;
         let result = parse_vision_response(body);
         assert!(result.is_err());
     }
