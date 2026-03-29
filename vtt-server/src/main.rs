@@ -345,7 +345,7 @@ async fn main() {
         config: config.clone(),
         jobs: Mutex::new(HashMap::new()),
         results: Mutex::new(HashMap::new()),
-        processing_semaphore: Semaphore::new(1),
+        processing_semaphore: Semaphore::new(config.server.max_concurrent_jobs as usize),
     });
 
     let app = Router::new()

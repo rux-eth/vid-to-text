@@ -21,43 +21,45 @@ vid-to-text is a client/server system that converts mp4 videos into structured J
                     ┌──────────────┐                        ┌─────────────────────┐
                     │  vtt-client  │                        │     vtt-server      │
                     │              │    HTTP/Tailscale       │                     │
- video.mp4 ────────▶  send job   ─────────────────────────▶│  receive job        │
+ video.mp4 ────────▶  upload     ─────────────────────────▶│  receive + save     │
                     │              │                        │       │              │
                     │              │                        │  ffmpeg: chunk video │
                     │              │                        │       │              │
-                    │              │                        │  ┌────┴────┐         │
-                    │              │                        │  │         │         │
-                    │              │                        │ audio    frames      │
-                    │              │                        │  │         │         │
-                    │              │                        │ Whisper  Ollama      │
-                    │              │                        │ (CPU)   (GPU)        │
-                    │              │                        │  │         │         │
-                    │              │                        │ [SPEECH] [VISUAL]    │
-                    │              │                        │ [SOUND]    │         │
-                    │              │                        │  │         │         │
-                    │              │                        │  └────┬────┘         │
-                    │              │                        │       │              │
+                    │              │                        │  for each chunk:     │
+                    │              │                        │    │                 │
+                    │              │                        │    ▼                 │
+                    │              │                        │  Whisper (CPU)       │
+                    │              │                        │  → [SPEECH] [SOUND]  │
+                    │              │                        │    │                 │
+                    │              │                        │    ▼ transcript      │
+                    │              │                        │  Ollama (GPU)        │
+                    │              │                        │  → [VISUAL]          │
+                    │              │                        │    │                 │
+                    │              │                        │    checkpoint chunk  │
+                    │              │                        │                     │
                     │              │                        │  merge & sort        │
  video.json ◀───────  write output◀────────────────────────│  return JSON         │
                     │              │                        │                     │
                     └──────────────┘                        └─────────────────────┘
 ```
 
+Per chunk, Whisper runs first (CPU) so the transcript can be passed to Qwen3-VL (GPU) as context. Chunks are processed sequentially in v1. Parallel chunk processing is a future optimization, though it requires care around cross-chunk context continuity.
+
 ## Key Abstractions
 
 | Abstraction | Description |
 |-------------|-------------|
-| `Job` | A processing request: source file path, config overrides, job ID. |
 | `Chunk` | A time-bounded segment of a video with start/end timestamps. Unit of processing and checkpointing. |
 | `Segment` | A single output entry: type (`speech`, `visual`, `sound`), start time, end time, content text. |
-| `Pipeline` | Trait for a processing stage. Whisper and Qwen3-VL each implement this — takes a `Chunk`, returns `Vec<Segment>`. |
+| `ChunkArtifacts` | Extracted audio (WAV) and frames (JPEG) for a single chunk, produced by ffmpeg. |
+| `ChunkManifest` | All artifacts for a job: job directory, video duration, and list of `ChunkArtifacts`. |
 | `Timeline` | The merged, sorted collection of all `Segment`s for a video. Serializes to the final JSON output. |
 
 ## Storage
 
 No database. File-based only:
 
-- **Chunk checkpoints**: Completed chunk results stored as JSON files in a temp directory on the server (e.g., `/tmp/vtt-jobs/<job-id>/chunk-003.json`). Enables resumability.
+- **Chunk checkpoints**: Completed chunk results stored as JSON files at `{temp_dir}/{job_id}/checkpoints/chunk_NNN.json`. Atomic writes (tmp + rename) ensure crash safety. Enables resumability.
 - **Final output**: JSON file written alongside the input mp4 (default) or at a user-specified path.
 - **Config**: TOML files at `~/.config/vid-to-text/`. Client uses `client.toml`, server uses `server.toml` (separate files since they run on different machines).
 
@@ -65,6 +67,6 @@ No database. File-based only:
 
 | Level | What | Where |
 |-------|------|-------|
-| Unit | Config parsing, timestamp math, segment merging, chunk planning | Inline `#[cfg(test)]` modules |
-| Integration | Client-server communication, job lifecycle, checkpoint/resume | `tests/` directory with mock pipelines |
-| System | End-to-end: real mp4 → real models → correct JSON output | Manual + scripted tests against sample videos |
+| Unit | Config parsing, timestamp math, segment merging, chunk planning, checkpoint I/O | Inline `#[cfg(test)]` modules |
+| Integration | ffmpeg probing, Whisper transcription, Ollama vision, full pipeline | `#[ignore]` tests requiring external deps |
+| System | End-to-end: real mp4 → real models → correct JSON output | `vtt-core/tests/system_test.rs` |

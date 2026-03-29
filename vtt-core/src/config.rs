@@ -111,6 +111,7 @@ pub struct ServerConfig {
 pub struct ServerListenConfig {
     pub listen_address: String,
     pub listen_port: u16,
+    pub max_concurrent_jobs: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +138,7 @@ pub struct OllamaConfig {
     pub endpoint: String,
     pub model: String,
     pub prompt_template_path: Option<String>,
+    pub default_prompt: String,
     pub timeout_seconds: u64,
 }
 
@@ -174,6 +176,7 @@ impl Default for ServerListenConfig {
         Self {
             listen_address: "0.0.0.0".to_string(),
             listen_port: 3000,
+            max_concurrent_jobs: 1,
         }
     }
 }
@@ -219,6 +222,12 @@ impl Default for OllamaConfig {
             endpoint: "http://localhost:11434".to_string(),
             model: "qwen3-vl:8b".to_string(),
             prompt_template_path: None,
+            default_prompt: "You are analyzing a sequence of video frames extracted at regular \
+                intervals. The frames are in chronological order and represent a continuous \
+                segment of video. Describe the visual content you observe: the setting, people, \
+                objects, actions, and any changes across the sequence. Be specific and concise. \
+                Focus on what is visually happening, not on speculating about audio or dialogue."
+                .to_string(),
             timeout_seconds: 300,
         }
     }
@@ -254,6 +263,11 @@ impl ServerConfig {
         if self.server.listen_port == 0 {
             return Err(VttError::Config(
                 "server.listen_port must be greater than 0".into(),
+            ));
+        }
+        if self.server.max_concurrent_jobs == 0 {
+            return Err(VttError::Config(
+                "server.max_concurrent_jobs must be greater than 0".into(),
             ));
         }
         if self.ffmpeg.path.is_empty() {
@@ -488,6 +502,7 @@ dir = "/home/user/output"
 [server]
 listen_address = "127.0.0.1"
 listen_port = 8080
+max_concurrent_jobs = 2
 
 [ffmpeg]
 path = "/usr/local/bin/ffmpeg"
@@ -505,6 +520,7 @@ n_threads = 4
 endpoint = "http://192.168.1.100:11434"
 model = "qwen3-vl:latest"
 prompt_template_path = "/etc/vtt/prompt.txt"
+default_prompt = "Custom default prompt"
 timeout_seconds = 600
 
 [vision]
@@ -519,6 +535,7 @@ max_upload_bytes = 8589934592
         let config: ServerConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen_address, "127.0.0.1");
         assert_eq!(config.server.listen_port, 8080);
+        assert_eq!(config.server.max_concurrent_jobs, 2);
         assert_eq!(config.ffmpeg.path, "/usr/local/bin/ffmpeg");
         assert_eq!(config.ffmpeg.chunk_duration_secs, 120);
         assert_eq!(config.ffmpeg.frame_format, "png");
@@ -533,6 +550,7 @@ max_upload_bytes = 8589934592
             config.ollama.prompt_template_path,
             Some("/etc/vtt/prompt.txt".to_string())
         );
+        assert_eq!(config.ollama.default_prompt, "Custom default prompt");
         assert_eq!(config.ollama.timeout_seconds, 600);
         assert_eq!(config.vision.fps, 1.0);
         assert_eq!(config.vision.max_tokens, 8192);

@@ -4,7 +4,7 @@
 
 ## What Is vid-to-text
 
-A Rust client/server tool that converts mp4 videos into structured JSON combining timestamped speech transcription (`[SPEECH]`), visual scene descriptions (`[VISUAL]`), and sound event tags (`[SOUND]`). The CLI client runs on the user's laptop and dispatches jobs to a server on a desktop with an RTX 4090, which runs Whisper (CPU) and Qwen3-VL-8B-Thinking (GPU via Ollama) in parallel.
+A Rust client/server tool that converts mp4 videos into structured JSON combining timestamped speech transcription (`[SPEECH]`), visual scene descriptions (`[VISUAL]`), and sound event tags (`[SOUND]`). The CLI client runs on the user's laptop and dispatches jobs to a server on a desktop with an RTX 4090, which runs Whisper (CPU) and Qwen3-VL-8B-Thinking (GPU via Ollama) sequentially per chunk — Whisper first, then Vision with the transcript as context.
 
 ## Build & Test Commands
 
@@ -17,7 +17,7 @@ cargo run -p vtt-server -- --help   # Server help
 
 ## Architecture
 
-Client/server split: `vtt-client` (laptop) sends mp4 files over HTTP to `vtt-server` (desktop with GPU). Server chunks video via ffmpeg, runs Whisper on CPU and Qwen3-VL on GPU in parallel, merges results into sorted JSON timeline, returns to client.
+Client/server split: `vtt-client` (laptop) sends mp4 files over HTTP to `vtt-server` (desktop with GPU). Server chunks video via ffmpeg, then for each chunk: runs Whisper on CPU first, passes the transcript to Qwen3-VL on GPU for context-aware visual description. All segments are merged into a sorted JSON timeline and returned to the client.
 
 See `docs/ARCHITECTURE.md` for the full architecture reference.
 
