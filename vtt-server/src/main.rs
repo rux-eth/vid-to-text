@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use vtt_core::{
@@ -78,6 +80,44 @@ impl IntoResponse for ApiError {
     }
 }
 
+// --- Background processing ---
+
+fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf) {
+    tokio::spawn(async move {
+        let _permit = state.processing_semaphore.acquire().await.unwrap();
+
+        {
+            let mut jobs = state.jobs.lock().unwrap();
+            if let Some(entry) = jobs.get_mut(&job_id) {
+                entry.status = JobStatus::Processing;
+            }
+        }
+
+        let job_id_str = job_id.to_string();
+        match process_video(&state.config, &video_path, &job_id_str).await {
+            Ok(timeline) => {
+                {
+                    let mut results = state.results.lock().unwrap();
+                    results.insert(job_id, timeline);
+                }
+                {
+                    let mut jobs = state.jobs.lock().unwrap();
+                    if let Some(entry) = jobs.get_mut(&job_id) {
+                        entry.status = JobStatus::Completed;
+                    }
+                }
+            }
+            Err(e) => {
+                let mut jobs = state.jobs.lock().unwrap();
+                if let Some(entry) = jobs.get_mut(&job_id) {
+                    entry.status = JobStatus::Failed;
+                    entry.error = Some(e.to_string());
+                }
+            }
+        }
+    });
+}
+
 // --- Handlers ---
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -144,46 +184,83 @@ async fn create_job(
         jobs.insert(job_id, entry);
     }
 
-    // Spawn background processing
-    let state_clone = Arc::clone(&state);
-    let source = request.source.clone();
-    tokio::spawn(async move {
-        // Acquire semaphore — only one job processes at a time (GPU safety)
-        let _permit = state_clone.processing_semaphore.acquire().await.unwrap();
+    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source));
 
-        // Update status to Processing
-        {
-            let mut jobs = state_clone.jobs.lock().unwrap();
-            if let Some(entry) = jobs.get_mut(&job_id) {
-                entry.status = JobStatus::Processing;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn upload_job(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    let job_id = Uuid::new_v4();
+    let job_dir = PathBuf::from(&state.config.processing.temp_dir).join(job_id.to_string());
+
+    tokio::fs::create_dir_all(&job_dir)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to create job dir: {e}")))?;
+
+    let mut filename = String::new();
+    let upload_path = job_dir.join("input.mp4");
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("invalid multipart data: {e}")))?
+    {
+        if field.name() == Some("file") {
+            filename = field
+                .file_name()
+                .unwrap_or("upload.mp4")
+                .to_string();
+
+            if !filename.ends_with(".mp4") {
+                return Err(ApiError::BadRequest("only mp4 files are supported".into()));
             }
+
+            let mut file = tokio::fs::File::create(&upload_path)
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to create upload file: {e}")))?;
+
+            let mut stream = field;
+            while let Some(chunk) = stream
+                .chunk()
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to read upload chunk: {e}")))?
+            {
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("failed to write upload chunk: {e}")))?;
+            }
+
+            file.flush()
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to flush upload file: {e}")))?;
+
+            break;
         }
+    }
 
-        let job_id_str = job_id.to_string();
-        let video_path = std::path::Path::new(&source);
+    if filename.is_empty() {
+        return Err(ApiError::BadRequest(
+            "missing 'file' field in multipart upload".into(),
+        ));
+    }
 
-        match process_video(&state_clone.config, video_path, &job_id_str).await {
-            Ok(timeline) => {
-                {
-                    let mut results = state_clone.results.lock().unwrap();
-                    results.insert(job_id, timeline);
-                }
-                {
-                    let mut jobs = state_clone.jobs.lock().unwrap();
-                    if let Some(entry) = jobs.get_mut(&job_id) {
-                        entry.status = JobStatus::Completed;
-                    }
-                }
-            }
-            Err(e) => {
-                let mut jobs = state_clone.jobs.lock().unwrap();
-                if let Some(entry) = jobs.get_mut(&job_id) {
-                    entry.status = JobStatus::Failed;
-                    entry.error = Some(e.to_string());
-                }
-            }
-        }
-    });
+    let entry = JobEntry {
+        id: job_id,
+        source: filename.clone(),
+        status: JobStatus::Queued,
+        error: None,
+    };
+    let response = entry.to_response();
+
+    {
+        let mut jobs = state.jobs.lock().unwrap();
+        jobs.insert(job_id, entry);
+    }
+
+    spawn_processing_task(Arc::clone(&state), job_id, upload_path);
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -231,7 +308,9 @@ async fn get_job_result(
         JobStatus::Failed => Err(ApiError::Conflict("job failed".into())),
         _ => Err(ApiError::Conflict(format!(
             "job is not completed (status: {})",
-            serde_json::to_string(&status).unwrap_or_default().trim_matches('"')
+            serde_json::to_string(&status)
+                .unwrap_or_default()
+                .trim_matches('"')
         ))),
     }
 }
@@ -251,6 +330,8 @@ async fn main() {
         std::process::exit(1);
     }
 
+    let max_upload = config.processing.max_upload_bytes as usize;
+
     let state = Arc::new(AppState {
         config: config.clone(),
         jobs: Mutex::new(HashMap::new()),
@@ -261,8 +342,10 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .route("/jobs", post(create_job))
+        .route("/jobs/upload", post(upload_job))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/result", get(get_job_result))
+        .layer(DefaultBodyLimit::max(max_upload))
         .with_state(state);
 
     let addr = config.bind_address();

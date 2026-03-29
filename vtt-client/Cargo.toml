@@ -8,3 +8,10 @@ license.workspace = true
 vtt-core = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
