@@ -22,7 +22,7 @@ Describe visual and sound events naturally within the narrative flow.";
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
-    max_tokens: u32,
+    max_completion_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ pub async fn run_format(
                 content: json_str,
             },
         ],
-        max_tokens: config.max_tokens,
+        max_completion_tokens: config.max_tokens,
     };
 
     // Call OpenAI API
@@ -216,7 +216,7 @@ mod tests {
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["model"], "gpt-5.4");
         assert_eq!(json["messages"].as_array().unwrap().len(), 2);
-        assert_eq!(json["max_tokens"], 4096);
+        assert_eq!(json["max_completion_tokens"], 4096);
     }
 
     #[test]
