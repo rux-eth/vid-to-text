@@ -58,7 +58,7 @@ impl Default for OpenAIConfig {
             model: "gpt-5.4".to_string(),
             endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
             max_tokens: 4096,
-            format_prompt_path: None,
+            format_prompt_path: Some("prompts/format.txt".to_string()),
         }
     }
 }
@@ -277,22 +277,8 @@ impl Default for OllamaConfig {
         Self {
             endpoint: "http://localhost:11434".to_string(),
             model: "qwen3-vl:8b".to_string(),
-            prompt_template_path: None,
-            default_prompt: "You are analyzing a sequence of video frames extracted at regular \
-                intervals. The frames are in chronological order and represent a continuous \
-                segment of video. Describe the visual content you observe: the setting, people, \
-                objects, actions, and any changes across the sequence. Be specific and concise. \
-                \
-                Guidelines: \
-                - Read and transcribe any visible text, titles, labels, captions, or graphics on screen. \
-                - Note facial expressions, body language, and emotional tone of characters. \
-                - Identify scene transitions, cuts, camera angle changes, or visual effects. \
-                - Describe spatial relationships: foreground, background, relative positions. \
-                - When a character's mouth appears to be moving during speech from the transcript, \
-                  identify them as the speaker. \
-                - Track characters consistently across frames by their appearance (clothing, color, position). \
-                - Note any inferences you can make from visual cues, but clearly distinguish \
-                  what you see from what you infer. Do not fabricate details that are not visible."
+            prompt_template_path: Some("prompts/vision.txt".to_string()),
+            default_prompt: "Describe the visual content of these video frames in detail."
                 .to_string(),
             timeout_seconds: 300,
             num_ctx: 65536,

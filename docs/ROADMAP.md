@@ -39,13 +39,24 @@ Full PR descriptions live in `prs/`. This file is the index.
 
 ---
 
-## Future (post-v1)
+## Phase 5: Post-v1 Enhancements
+
+| PR | Description | Status | Depends on |
+|----|-------------|--------|------------|
+| PR-011 | YouTube URL support via yt-dlp | `[x]` | PR-008+009 |
+| PR-012 | Human-readable format command via OpenAI GPT-5.4 | `[x]` | PR-010 |
+| PR-013 | Granular visual segments, retry logic, num_ctx, timing logs | `[x]` | PR-012 |
+| PR-014 | Overlapped Whisper/Vision with cross-chunk context | `[x]` | PR-013 |
+| PR-015 | Externalized prompts (CRISPE framework) | `[~]` | PR-014 |
+
+## Future
 
 - Wake-on-LAN support (`vid-to-text wake`)
-- YouTube URL support (`--url`)
 - Dedicated audio classifier for `[SOUND]` stream
-- Human-readable output layer
+- Scene-change detection for adaptive frame batching
 - SRT/VTT export
+- `--prompt` flag for custom format prompts
+- `--duration` flag to limit processing to first N seconds
 
 ---
 
