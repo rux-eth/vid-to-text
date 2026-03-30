@@ -47,6 +47,10 @@ enum Commands {
         /// Max video FPS for URL downloads
         #[arg(long)]
         max_fps: Option<u32>,
+
+        /// Server-side processing profile (e.g. "charts", "lectures")
+        #[arg(long)]
+        profile: Option<String>,
     },
 
     /// Check system dependencies and configuration
@@ -127,6 +131,7 @@ async fn main() {
             force,
             max_resolution,
             max_fps,
+            profile,
         } => {
             let force = *force;
             apply_cli_overrides(&mut config, server, output);
@@ -154,6 +159,7 @@ async fn main() {
                     force,
                     max_resolution.clone(),
                     *max_fps,
+                    profile.clone(),
                 )
                 .await
             } else if let Some(path) = path {

@@ -13,8 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use vtt_core::{
-    check_ffmpeg, check_ytdlp, download_video, load_config, process_video, JobStatus,
-    OllamaClient, ServerConfig, Timeline,
+    check_ffmpeg, check_ytdlp, download_video, load_config, load_profile, process_video,
+    JobStatus, OllamaClient, ServerConfig, Timeline,
 };
 
 // --- Request/Response types ---
@@ -24,6 +24,7 @@ struct CreateJobRequest {
     source: String,
     #[serde(default)]
     force: bool,
+    profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +34,7 @@ struct UrlJobRequest {
     force: bool,
     max_resolution: Option<String>,
     max_fps: Option<u32>,
+    profile: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,7 +96,16 @@ impl IntoResponse for ApiError {
 
 // --- Background processing ---
 
-fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool, source_name: String) {
+/// Resolve an optional profile name to a ServerConfig.
+fn resolve_config(base: &ServerConfig, profile: &Option<String>) -> Result<ServerConfig, ApiError> {
+    match profile {
+        Some(name) => load_profile(base, name)
+            .map_err(|e| ApiError::BadRequest(e.to_string())),
+        None => Ok(base.clone()),
+    }
+}
+
+fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool, source_name: String, config: ServerConfig) {
     tokio::spawn(async move {
         let _permit = state.processing_semaphore.acquire().await.unwrap();
 
@@ -106,7 +117,7 @@ fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf
         }
 
         let job_id_str = job_id.to_string();
-        match process_video(&state.config, &video_path, &job_id_str, force, Some(&source_name)).await {
+        match process_video(&config, &video_path, &job_id_str, force, Some(&source_name)).await {
             Ok(timeline) => {
                 {
                     let mut results = state.results.lock().unwrap();
@@ -205,7 +216,8 @@ async fn create_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source), request.force, request.source.clone());
+    let cfg = resolve_config(&state.config, &request.profile)?;
+    spawn_processing_task(Arc::clone(&state), job_id, PathBuf::from(&request.source), request.force, request.source.clone(), cfg);
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -288,7 +300,7 @@ async fn upload_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force, filename.clone());
+    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force, filename.clone(), state.config.clone());
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -314,6 +326,9 @@ async fn create_url_job(
         let mut jobs = state.jobs.lock().unwrap();
         jobs.insert(job_id, entry);
     }
+
+    // Resolve profile before spawning (so errors return to client)
+    let config_override = resolve_config(&state.config, &request.profile)?;
 
     // Spawn background: download then process
     let state_clone = Arc::clone(&state);
@@ -369,7 +384,7 @@ async fn create_url_job(
         // Process video
         let source_name = format!("{}.mp4", download.title);
         match process_video(
-            &state_clone.config,
+            &config_override,
             &download.video_path,
             &job_id_str,
             force,
