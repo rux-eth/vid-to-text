@@ -161,6 +161,8 @@ struct UrlJobRequestBody {
     max_resolution: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_fps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
 }
 
 /// Submit a URL job to the server for download and processing.
@@ -171,12 +173,14 @@ pub async fn submit_url_job(
     force: bool,
     max_resolution: Option<String>,
     max_fps: Option<u32>,
+    profile: Option<String>,
 ) -> Result<JobResponse, String> {
     let body = UrlJobRequestBody {
         url: url.to_string(),
         force,
         max_resolution,
         max_fps,
+        profile,
     };
 
     let resp = client

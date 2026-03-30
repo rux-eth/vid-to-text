@@ -439,6 +439,89 @@ where
         .map_err(|e| VttError::Config(format!("failed to parse {}: {}", path.display(), e)))
 }
 
+/// Returns the profiles directory path.
+pub fn profiles_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("profiles"))
+}
+
+/// Load a server config profile by name and merge it with a base config.
+/// The profile only needs to contain the fields being overridden.
+pub fn load_profile(base: &ServerConfig, profile_name: &str) -> Result<ServerConfig, VttError> {
+    let dir = profiles_dir()
+        .ok_or_else(|| VttError::Config("could not determine profiles directory".into()))?;
+
+    let path = dir.join(format!("{profile_name}.toml"));
+    if !path.exists() {
+        return Err(VttError::Config(format!(
+            "profile not found: {} (looked in {})",
+            profile_name,
+            path.display()
+        )));
+    }
+
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| VttError::Config(format!("failed to read profile {}: {}", path.display(), e)))?;
+
+    // Parse the profile TOML into a Value to merge selectively
+    let overrides: toml::Value = toml::from_str(&contents)
+        .map_err(|e| VttError::Config(format!("failed to parse profile {}: {}", path.display(), e)))?;
+
+    // Serialize the base config to TOML Value, merge, then deserialize back
+    let base_str = toml::to_string(base)
+        .map_err(|e| VttError::Config(format!("failed to serialize base config: {e}")))?;
+    let mut base_val: toml::Value = toml::from_str(&base_str)
+        .map_err(|e| VttError::Config(format!("failed to parse base config: {e}")))?;
+
+    // Deep merge: override values replace base values
+    merge_toml(&mut base_val, &overrides);
+
+    let merged: ServerConfig = base_val.try_into()
+        .map_err(|e| VttError::Config(format!("failed to apply profile {profile_name}: {e}")))?;
+
+    Ok(merged)
+}
+
+/// List available profile names.
+pub fn list_profiles() -> Vec<String> {
+    let dir = match profiles_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(".toml") {
+                Some(name.trim_end_matches(".toml").to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Deep merge TOML values: override replaces base at the leaf level.
+fn merge_toml(base: &mut toml::Value, overrides: &toml::Value) {
+    match (base.as_table_mut(), overrides.as_table()) {
+        (Some(base_table), Some(override_table)) => {
+            for (key, override_val) in override_table {
+                if let Some(base_val) = base_table.get_mut(key) {
+                    merge_toml(base_val, override_val);
+                } else {
+                    base_table.insert(key.clone(), override_val.clone());
+                }
+            }
+        }
+        _ => {
+            *base = overrides.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

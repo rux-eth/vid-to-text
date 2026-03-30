@@ -94,6 +94,7 @@ pub async fn process_url(
     force: bool,
     max_resolution: Option<String>,
     max_fps: Option<u32>,
+    profile: Option<String>,
 ) -> Result<(), String> {
     let server_url = config.server_url();
 
@@ -107,7 +108,7 @@ pub async fn process_url(
     }
 
     eprintln!("Submitting URL: {url}");
-    let job = api::submit_url_job(client, &server_url, url, force, max_resolution, max_fps).await?;
+    let job = api::submit_url_job(client, &server_url, url, force, max_resolution, max_fps, profile).await?;
     eprintln!("Job {} created", job.id);
 
     // Poll until done
