@@ -1,4 +1,5 @@
 mod api;
+mod cache;
 mod doctor;
 mod format;
 mod process;
@@ -51,10 +52,13 @@ enum Commands {
     /// Check system dependencies and configuration
     Doctor,
 
+    /// List all cached processed videos
+    List,
+
     /// Format a Timeline JSON file into human-readable Markdown via OpenAI
     Format {
-        /// Path to Timeline JSON file
-        input: PathBuf,
+        /// Path to Timeline JSON file or cache hash (8 hex chars)
+        input: String,
 
         /// Output path (default: input_formatted.md)
         #[arg(short, long)]
@@ -176,6 +180,35 @@ async fn main() {
         Commands::Doctor => {
             doctor::run_doctor(&config).await;
         }
+        Commands::List => {
+            match cache::cache_list() {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        eprintln!("No cached videos.");
+                    } else {
+                        println!("{:<10} {:<50} {:>6} {:>10} {}", "HASH", "TITLE", "DUR", "SEGMENTS", "DATE");
+                        println!("{}", "-".repeat(90));
+                        for e in &entries {
+                            let dur_min = e.duration_seconds / 60.0;
+                            let title = if e.title.len() > 48 {
+                                format!("{}...", &e.title[..45])
+                            } else {
+                                e.title.clone()
+                            };
+                            let date = &e.processed_at[..10];
+                            println!(
+                                "{:<10} {:<50} {:>5.1}m {:>10} {}",
+                                e.hash, title, dur_min, format!("{} segs", e.segment_count), date
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Format {
             input,
             output,
@@ -183,9 +216,16 @@ async fn main() {
             prompt,
             prompt_id,
         } => {
+            let resolved_path = match cache::resolve_input(input) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            };
             if let Err(e) = format::run_format(
                 &config.openai,
-                input,
+                &resolved_path,
                 output.as_deref(),
                 model.as_deref(),
                 prompt.as_deref(),

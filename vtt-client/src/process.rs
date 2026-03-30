@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use vtt_core::ClientConfig;
 
 use crate::api;
+use crate::cache;
 
 /// Compute the output JSON path for a given input mp4 file.
 pub fn compute_output_path(input_path: &Path, output_dir: &Option<String>) -> PathBuf {
@@ -47,6 +48,20 @@ pub async fn process_single_file(
         .to_string_lossy()
         .to_string();
 
+    // Check cache first
+    let abs_path = input_path
+        .canonicalize()
+        .unwrap_or_else(|_| input_path.to_path_buf())
+        .display()
+        .to_string();
+    if !force {
+        if let Some(cached_path) = cache::cache_lookup(&abs_path) {
+            eprintln!("Found cached result for {filename}");
+            eprintln!("  {}", cached_path.display());
+            return Ok(());
+        }
+    }
+
     // Upload
     eprintln!("Uploading {filename}...");
     let job = api::upload_file(client, &server_url, input_path, force).await?;
@@ -58,23 +73,12 @@ pub async fn process_single_file(
     // Download result
     let timeline = api::download_result(client, &server_url, &job.id).await?;
 
-    // Write output
-    let output_path = compute_output_path(input_path, &config.output.dir);
-    if let Some(parent) = output_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("failed to create output dir: {e}"))?;
-    }
-
-    let json = serde_json::to_string_pretty(&timeline)
-        .map_err(|e| format!("failed to serialize timeline: {e}"))?;
-    tokio::fs::write(&output_path, &json)
-        .await
-        .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
+    // Cache the result
+    let cached_path = cache::cache_store(&abs_path, None, &timeline)?;
 
     eprintln!(
-        "Wrote {} ({} segments, {:.1}s duration)",
-        output_path.display(),
+        "Cached {} ({} segments, {:.1}s duration)",
+        cached_path.display(),
         timeline.segments.len(),
         timeline.duration_seconds
     );
@@ -93,6 +97,15 @@ pub async fn process_url(
 ) -> Result<(), String> {
     let server_url = config.server_url();
 
+    // Check cache first
+    if !force {
+        if let Some(cached_path) = cache::cache_lookup(url) {
+            eprintln!("Found cached result for {url}");
+            eprintln!("  {}", cached_path.display());
+            return Ok(());
+        }
+    }
+
     eprintln!("Submitting URL: {url}");
     let job = api::submit_url_job(client, &server_url, url, force, max_resolution, max_fps).await?;
     eprintln!("Job {} created", job.id);
@@ -103,36 +116,12 @@ pub async fn process_url(
     // Download result
     let timeline = api::download_result(client, &server_url, &job.id).await?;
 
-    // Derive output filename from source
-    let source_stem = std::path::Path::new(&timeline.source)
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let json_name = format!("{source_stem}.json");
-
-    let output_path = match &config.output.dir {
-        Some(dir) => std::path::PathBuf::from(dir).join(&json_name),
-        None => std::path::PathBuf::from(&json_name),
-    };
-
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("failed to create output dir: {e}"))?;
-        }
-    }
-
-    let json = serde_json::to_string_pretty(&timeline)
-        .map_err(|e| format!("failed to serialize timeline: {e}"))?;
-    tokio::fs::write(&output_path, &json)
-        .await
-        .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
+    // Cache the result
+    let cached_path = cache::cache_store(url, Some(url), &timeline)?;
 
     eprintln!(
-        "Wrote {} ({} segments, {:.1}s duration)",
-        output_path.display(),
+        "Cached {} ({} segments, {:.1}s duration)",
+        cached_path.display(),
         timeline.segments.len(),
         timeline.duration_seconds
     );
