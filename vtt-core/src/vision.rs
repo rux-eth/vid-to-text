@@ -192,7 +192,14 @@ impl OllamaClient {
 
                 match parse_vision_response(&body) {
                     Ok(desc) => {
-                        description = Some(desc);
+                        let cleaned = truncate_repetition(&desc);
+                        if cleaned.len() < desc.len() {
+                            eprintln!(
+                                "[vision] batch {} had repetitive output, truncated from {} to {} chars",
+                                batch_idx, desc.len(), cleaned.len()
+                            );
+                        }
+                        description = Some(cleaned);
                         break;
                     }
                     Err(_) if attempt < 2 => {
@@ -227,6 +234,40 @@ fn load_prompt_template(path: &Option<String>, default_prompt: &str) -> Result<S
         Some(p) if !p.is_empty() => std::fs::read_to_string(p)
             .map_err(|e| VttError::Vision(format!("failed to read prompt template '{p}': {e}"))),
         _ => Ok(default_prompt.to_string()),
+    }
+}
+
+/// Detect and truncate repetitive model output (generation loops).
+/// If any sentence appears more than 3 times, truncate at the second occurrence.
+fn truncate_repetition(text: &str) -> String {
+    use std::collections::HashMap;
+
+    let sentences: Vec<&str> = text.split('.').collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut result = Vec::new();
+
+    for sent in &sentences {
+        let key = sent.trim().to_lowercase();
+        if key.len() < 15 {
+            result.push(*sent);
+            continue;
+        }
+        let count = seen.entry(key).or_insert(0);
+        *count += 1;
+        if *count <= 2 {
+            result.push(*sent);
+        } else if *count == 3 {
+            // Stop here — repetition detected
+            break;
+        }
+    }
+
+    let joined = result.join(".");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() {
+        text.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
