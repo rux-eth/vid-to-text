@@ -408,7 +408,7 @@ impl ServerConfig {
 // --- Config Loading ---
 
 pub fn config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|p| p.join("vid-to-text"))
+    dirs::home_dir().map(|p| p.join(".vid-to-text").join("config"))
 }
 
 pub fn config_file_path(filename: &str) -> Option<PathBuf> {
