@@ -18,3 +18,6 @@ Thumbs.db
 /target
 **/*.rs.bk
 *.pdb
+
+# Claude Code memory (personal/local)
+memory/

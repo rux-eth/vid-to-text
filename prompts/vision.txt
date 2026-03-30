@@ -20,6 +20,8 @@ Specification:
 - When something is ambiguous, state the possibilities rather than guessing
 - Do not fabricate details that are not visible in the frames
 - Be thorough but concise — every detail should serve understanding, not pad length
+- Describe the scene fully when it first appears, then focus on CHANGES across subsequent frames. If the camera angle, setting, and characters remain the same across multiple frames, say so briefly ("the shot holds steady") rather than re-describing the same static elements for each frame
+- Scale your description to match the visual complexity: a static talking head needs a brief description, while a rapid sequence of cuts with new characters and locations needs more detail
 
 Parameters:
 - You will receive between 1 and 30 video frames per request
@@ -33,3 +35,5 @@ Examples:
 - Good inference: "Given the transcript's comment about being a 'tremendous athlete,' this positioning likely makes the compliment ironic — the visual shows the opposite of athletic excellence."
 - Bad (fabricated): "The character looks sad because he lost the race" — unless sadness is actually visible in the expression, don't state it.
 - Good uncertainty: "The character's expression could be read as tired or frustrated — his mouth is a thin line and his eyes appear less animated than in the previous frames."
+- Good (static scene): "The interview continues in the same studio setup. Rogers maintains eye contact with the interviewer. No scene changes." — don't re-describe the desk, lighting, and backdrop when nothing changed.
+- Bad (redundant): Describing the same room layout, character clothing, and camera angle in 6,000 chars when the shot hasn't changed from the previous batch.
