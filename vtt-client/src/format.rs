@@ -123,7 +123,8 @@ pub async fn run_format(
 
     let model = model_override.unwrap_or(&config.model).to_string();
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(600))
+        .pool_max_idle_per_host(0)
         .build()
         .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
@@ -140,7 +141,7 @@ pub async fn run_format(
 
         // Estimate token count (~4 chars per token)
         let est_tokens = json_str.len() / 4;
-        let max_input_tokens = 30_000; // Conservative limit for reliable API calls
+        let max_input_tokens = 25_000; // Keep chunks under ~200KB for reliable rustls
 
         if est_tokens > max_input_tokens {
             eprintln!(
@@ -205,10 +206,15 @@ async fn call_chat_api(
         max_completion_tokens: max_tokens,
     };
 
+    let body_json = serde_json::to_vec(&request)
+        .map_err(|e| format!("failed to serialize request: {e}"))?;
+    eprintln!("[format] sending {} bytes to OpenAI...", body_json.len());
+
     let resp = client
         .post("https://api.openai.com/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
-        .json(&request)
+        .header("Content-Type", "application/json")
+        .body(body_json)
         .send()
         .await
         .map_err(|e| format!("OpenAI API request failed: {e}"))?;
@@ -302,7 +308,7 @@ async fn format_chunked(
     max_tokens: u32,
 ) -> Result<String, String> {
     let segments = &timeline.segments;
-    let max_input_tokens = 30_000;
+    let max_input_tokens = 25_000;
 
     // Split segments into chunks that fit under the token limit
     let mut chunks: Vec<Vec<&vtt_core::Segment>> = Vec::new();
@@ -346,14 +352,17 @@ async fn format_chunked(
                 "You are continuing a video transcript document. \
                 Here is the summary and character identification from the first section:\n\n\
                 {header_context}\n\n\
-                Now continue the scene-by-scene transcript for the next batch of segments.\n\
+                Now continue the scene-by-scene transcript for the next batch of segments.\n\n\
                 Rules:\n\
                 - Do NOT repeat the summary or character identification\n\
                 - Do NOT re-introduce characters — they are already established\n\
                 - Continue scene numbering from where the previous section left off\n\
                 - Only describe what is in the segments provided — do not fabricate or infer beyond the data\n\
                 - Maintain the same writing style and format as the previous section\n\
-                - Start directly with the next scene heading"
+                - Start directly with the next scene heading\n\
+                - IMPORTANT: Group consecutive segments into coherent SCENES based on visual context, \
+                not raw segment boundaries. Multiple segments sharing the same chart, setting, or topic \
+                belong in ONE scene with a descriptive heading. Do NOT create one scene per segment."
             )
         };
 
