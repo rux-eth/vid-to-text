@@ -235,6 +235,7 @@ async fn upload_job(
 
     let mut filename = String::new();
     let mut force = false;
+    let mut profile: Option<String> = None;
     let upload_path = job_dir.join("input.mp4");
 
     while let Some(field) = multipart
@@ -245,6 +246,14 @@ async fn upload_job(
         if field.name() == Some("force") {
             let text = field.text().await.unwrap_or_default();
             force = text == "true";
+            continue;
+        }
+
+        if field.name() == Some("profile") {
+            let text = field.text().await.unwrap_or_default();
+            if !text.is_empty() {
+                profile = Some(text);
+            }
             continue;
         }
 
@@ -300,7 +309,8 @@ async fn upload_job(
         jobs.insert(job_id, entry);
     }
 
-    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force, filename.clone(), state.config.clone());
+    let cfg = resolve_config(&state.config, &profile)?;
+    spawn_processing_task(Arc::clone(&state), job_id, upload_path, force, filename.clone(), cfg);
 
     Ok((StatusCode::CREATED, Json(response)))
 }
