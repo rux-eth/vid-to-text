@@ -56,6 +56,12 @@ enum Commands {
     /// Check system dependencies and configuration
     Doctor,
 
+    /// Cancel queued jobs on the server
+    Cancel {
+        /// Job ID to cancel, or "all" to clear the queue
+        target: String,
+    },
+
     /// List all cached processed videos
     List,
 
@@ -176,6 +182,47 @@ async fn main() {
                 }
             } else {
                 Err("either a path or --url must be provided".to_string())
+            };
+
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Cancel { target } => {
+            let server_url = config.server_url();
+            let client = reqwest::Client::new();
+
+            let result = if target == "all" {
+                let resp = client
+                    .delete(format!("{server_url}/jobs"))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => {
+                        let body: serde_json::Value = r.json().await.unwrap_or_default();
+                        let count = body.get("cancelled").and_then(|v| v.as_u64()).unwrap_or(0);
+                        eprintln!("Cancelled {count} queued job(s).");
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("failed to cancel jobs: {e}")),
+                }
+            } else {
+                let resp = client
+                    .delete(format!("{server_url}/jobs/{target}"))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        eprintln!("Cancelled job {target}.");
+                        Ok(())
+                    }
+                    Ok(r) => {
+                        let body = r.text().await.unwrap_or_default();
+                        Err(format!("{body}"))
+                    }
+                    Err(e) => Err(format!("failed to cancel job: {e}")),
+                }
             };
 
             if let Err(e) = result {

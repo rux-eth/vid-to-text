@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -467,6 +467,53 @@ async fn get_job_result(
     }
 }
 
+async fn cancel_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let job_id: Uuid = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("invalid job ID: {id}")))?;
+
+    let mut jobs = state.jobs.lock().unwrap();
+    let entry = jobs
+        .get_mut(&job_id)
+        .ok_or_else(|| ApiError::NotFound(format!("job not found: {job_id}")))?;
+
+    match entry.status {
+        JobStatus::Queued => {
+            entry.status = JobStatus::Failed;
+            entry.error = Some("cancelled by user".into());
+            Ok(Json(json!({ "cancelled": job_id.to_string() })))
+        }
+        JobStatus::Processing => {
+            Err(ApiError::Conflict("cannot cancel a job that is currently processing".into()))
+        }
+        _ => {
+            Err(ApiError::Conflict(format!("job already {}",
+                serde_json::to_string(&entry.status).unwrap_or_default().trim_matches('"')
+            )))
+        }
+    }
+}
+
+async fn cancel_all_jobs(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let mut jobs = state.jobs.lock().unwrap();
+    let mut cancelled = 0;
+
+    for entry in jobs.values_mut() {
+        if entry.status == JobStatus::Queued {
+            entry.status = JobStatus::Failed;
+            entry.error = Some("cancelled by user".into());
+            cancelled += 1;
+        }
+    }
+
+    Json(json!({ "cancelled": cancelled }))
+}
+
 #[tokio::main]
 async fn main() {
     let config = match load_config::<ServerConfig>("server.toml") {
@@ -498,6 +545,8 @@ async fn main() {
         .route("/jobs/url", post(create_url_job))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/result", get(get_job_result))
+        .route("/jobs/{id}", delete(cancel_job))
+        .route("/jobs", delete(cancel_all_jobs))
         .layer(DefaultBodyLimit::max(max_upload))
         .with_state(state);
 
