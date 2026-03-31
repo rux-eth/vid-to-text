@@ -68,12 +68,21 @@ struct ResponsesContent {
 }
 
 /// Compute the output path for a formatted file.
+/// If input is inside the cache dir, put formatted.md alongside it.
+/// Otherwise put _formatted.md next to the input file.
 pub fn compute_format_output_path(input_path: &Path) -> PathBuf {
-    let stem = input_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
-    input_path.with_file_name(format!("{stem}_formatted.md"))
+    let cache_marker = ".vid-to-text/cache/";
+    let path_str = input_path.display().to_string();
+    if path_str.contains(cache_marker) {
+        // Inside cache — put formatted.md in the same cache entry dir
+        input_path.with_file_name("formatted.md")
+    } else {
+        let stem = input_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        input_path.with_file_name(format!("{stem}_formatted.md"))
+    }
 }
 
 /// Load the system prompt from a file or return the default.
