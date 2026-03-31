@@ -122,7 +122,10 @@ pub async fn run_format(
     );
 
     let model = model_override.unwrap_or(&config.model).to_string();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
     let content = if let Some(pid) = prompt_id {
         // Responses API with stored prompt
@@ -134,7 +137,26 @@ pub async fn run_format(
             .map(|p| Some(p.display().to_string()))
             .unwrap_or(config.format_prompt_path.clone());
         let system_prompt = load_system_prompt(&prompt_path)?;
-        call_chat_api(&client, &api_key, &model, &system_prompt, &json_str, config.max_tokens).await?
+
+        // Estimate token count (~4 chars per token)
+        let est_tokens = json_str.len() / 4;
+        let max_input_tokens = 30_000; // Conservative limit for reliable API calls
+
+        if est_tokens > max_input_tokens {
+            eprintln!(
+                "Large input (~{}K tokens), chunking into sections...",
+                est_tokens / 1000
+            );
+            format_chunked(
+                &client, &api_key, &model, &system_prompt, &timeline, config.max_tokens,
+            )
+            .await?
+        } else {
+            call_chat_api(
+                &client, &api_key, &model, &system_prompt, &json_str, config.max_tokens,
+            )
+            .await?
+        }
     };
 
     // Write output
@@ -266,6 +288,98 @@ async fn call_responses_api(
     }
 
     Ok(content)
+}
+
+/// Format a large timeline by splitting into chunks that fit within context limits.
+/// Section 1 gets the full prompt (summary + characters + scenes).
+/// Subsequent sections continue the transcript with context from section 1.
+async fn format_chunked(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    timeline: &Timeline,
+    max_tokens: u32,
+) -> Result<String, String> {
+    let segments = &timeline.segments;
+    let max_input_tokens = 30_000;
+
+    // Split segments into chunks that fit under the token limit
+    let mut chunks: Vec<Vec<&vtt_core::Segment>> = Vec::new();
+    let mut current_chunk: Vec<&vtt_core::Segment> = Vec::new();
+    let mut current_size = 0;
+
+    for seg in segments {
+        let seg_size = seg.content.len() / 4 + 50; // rough token estimate + overhead
+        if current_size + seg_size > max_input_tokens && !current_chunk.is_empty() {
+            chunks.push(current_chunk);
+            current_chunk = Vec::new();
+            current_size = 0;
+        }
+        current_chunk.push(seg);
+        current_size += seg_size;
+    }
+    if !current_chunk.is_empty() {
+        chunks.push(current_chunk);
+    }
+
+    eprintln!("Split into {} sections", chunks.len());
+
+    let mut full_output = String::new();
+    let mut header_context = String::new();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let chunk_timeline = Timeline {
+            source: timeline.source.clone(),
+            duration_seconds: timeline.duration_seconds,
+            segments: chunk.iter().map(|s| (*s).clone()).collect(),
+        };
+        let chunk_json = serde_json::to_string(&chunk_timeline)
+            .map_err(|e| format!("failed to serialize chunk: {e}"))?;
+
+        let prompt = if i == 0 {
+            // First section: full format prompt
+            system_prompt.to_string()
+        } else {
+            // Continuation sections
+            format!(
+                "You are continuing a video transcript document. \
+                Here is the summary and character identification from the first section:\n\n\
+                {header_context}\n\n\
+                Now continue the scene-by-scene transcript for the next batch of segments.\n\
+                Rules:\n\
+                - Do NOT repeat the summary or character identification\n\
+                - Do NOT re-introduce characters — they are already established\n\
+                - Continue scene numbering from where the previous section left off\n\
+                - Only describe what is in the segments provided — do not fabricate or infer beyond the data\n\
+                - Maintain the same writing style and format as the previous section\n\
+                - Start directly with the next scene heading"
+            )
+        };
+
+        eprintln!("  Section {}/{} ({} segments)...", i + 1, chunks.len(), chunk.len());
+
+        let result = call_chat_api(client, api_key, model, &prompt, &chunk_json, max_tokens).await?;
+
+        if i == 0 {
+            // Extract header (summary + characters) for context in later sections
+            // Look for the scene transcript start
+            if let Some(scene_pos) = result.find("## Scene") {
+                header_context = result[..scene_pos].to_string();
+            } else if let Some(scene_pos) = result.find("### Scene") {
+                header_context = result[..scene_pos].to_string();
+            } else {
+                // Fallback: take first 2000 chars as context
+                header_context = result.chars().take(2000).collect();
+            }
+            full_output.push_str(&result);
+        } else {
+            full_output.push_str("\n\n");
+            full_output.push_str(&result);
+        }
+    }
+
+    Ok(full_output)
 }
 
 #[cfg(test)]
