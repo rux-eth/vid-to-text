@@ -28,4 +28,7 @@ pub enum VttError {
 
     #[error("download error: {0}")]
     Download(String),
+
+    #[error("job cancelled")]
+    Cancelled,
 }

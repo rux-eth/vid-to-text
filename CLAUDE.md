@@ -13,9 +13,16 @@ A `format` subcommand sends the JSON output to OpenAI's GPT-5.4 to produce human
 ```bash
 cargo build --workspace        # Build all crates
 cargo test --workspace         # Run all tests
+cargo test -p vtt-core config::tests::test_name   # Run a single test by path
+cargo test --workspace -- --nocapture             # Show println output during tests
 cargo run -p vtt-client -- --help   # Client CLI help
 cargo run -p vtt-server -- --help   # Server help
 ```
+
+External runtime dependencies (not in Cargo.toml; `doctor` checks for these):
+- `ffmpeg` / `ffprobe` on PATH
+- `yt-dlp` on PATH (for `--url` inputs)
+- Ollama running on the server host with the configured vision model pulled
 
 ## CLI Usage
 
@@ -42,6 +49,14 @@ Client/server split: `vtt-client` (laptop) sends mp4 files or YouTube URLs over 
 
 The `format` command runs client-side only — reads the JSON, sends to OpenAI API, writes Markdown.
 
+Workspace layout:
+- `vtt-core/` — pipeline orchestration, config, ffmpeg, whisper, vision, checkpoint, ytdlp (library used by both client and server)
+- `vtt-client/` — CLI (`process` / `format` / `doctor`), HTTP client, response cache
+- `vtt-server/` — single `main.rs` axum server that wraps `vtt-core::pipeline`
+- `prompts/` — `vision.txt` (Qwen3-VL system prompt), `format.txt` (GPT format prompt)
+
+The top-level `README.md` is the `vibe-rails` template README, not documentation for this project — read `docs/ARCHITECTURE.md` for project context.
+
 See `docs/ARCHITECTURE.md` for the full architecture reference.
 
 ## Implementation Status
@@ -60,9 +75,29 @@ See `docs/ROADMAP.md` for the ordered PR plan. Full PR descriptions in `prs/`.
 - `PROCEDURE-design-planning.md` — how to run design sessions
 - `PROCEDURE-code-audit.md` — post-design-session code audit
 
+## Remote server access
+
+The GPU desktop (RTX 4090, Tailscale) is reachable via the `ssh-desktop` shell alias (= `ssh rux@100.90.42.41`). The server is launched manually and foreground when needed — there is no systemd unit, launch script, or persistent log file. The repo is also checked out at `~/vid-to-text/` on the desktop.
+
+Useful one-shots (prefer `ssh-desktop '<cmd>'` over interactive sessions):
+
+```bash
+ssh-desktop 'cat ~/.vid-to-text/config/server.toml'    # Server config on desktop
+ssh-desktop 'pgrep -a vtt-server'                      # Is the server running?
+ssh-desktop 'ollama ps'                                # Loaded vision model + VRAM usage
+ssh-desktop 'nvidia-smi'                               # GPU state
+ssh-desktop 'ls ~/vid-to-text/target/release/'         # Release binaries on desktop
+ssh-desktop 'ls /tmp/vtt-jobs/'                        # Active job working dirs (default processing.temp_dir)
+```
+
+To launch the server on the desktop manually:
+```bash
+ssh-desktop 'cd ~/vid-to-text && cargo run --release -p vtt-server'
+```
+
 ## Key Configuration
 
-**Server** (`~/.config/vid-to-text/server.toml`):
+**Server** (`~/.vid-to-text/config/server.toml`):
 - `whisper.model_path` — path to Whisper GGUF model file
 - `whisper.n_threads` — CPU threads for transcription (default 8)
 - `ollama.model` — vision model (recommended: `qwen3-vl:8b-instruct-q8_0`)
@@ -71,8 +106,8 @@ See `docs/ROADMAP.md` for the ordered PR plan. Full PR descriptions in `prs/`.
 - `vision.fps` — frame extraction rate (default 2.0)
 - `ffmpeg.chunk_duration_secs` — chunk size (default 180)
 
-**Client** (`~/.config/vid-to-text/client.toml`):
-- `server.host` / `server.port` — server address
+**Client** (`~/.vid-to-text/config/client.toml`):
+- `server.host` / `server.port` — server address (default port: **3001**; port 3000 is not available on the desktop)
 - `openai.model` — GPT model for format command (default gpt-5.4)
 - API key via `OPENAI_API_KEY` env var or `.env` file
 

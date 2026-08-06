@@ -2,6 +2,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     clear_checkpoints, load_checkpoints, parse_timestamp, prepare_chunks, save_checkpoint,
     transcribe_chunk, OllamaClient, Segment, SegmentType, ServerConfig, Timeline, VttError,
@@ -21,8 +23,18 @@ pub async fn process_video(
     job_id: &str,
     force: bool,
     source_name: Option<&str>,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<Timeline, VttError> {
     config.validate()?;
+
+    let check_cancelled = || -> Result<(), VttError> {
+        if let Some(ref token) = cancel_token {
+            if token.is_cancelled() {
+                return Err(VttError::Cancelled);
+            }
+        }
+        Ok(())
+    };
 
     let pipeline_start = Instant::now();
 
@@ -73,6 +85,7 @@ pub async fn process_video(
     > = None;
 
     for (i, artifact) in manifest.chunks.iter().enumerate() {
+        check_cancelled()?;
         let chunk_start = Instant::now();
         let ci = artifact.chunk.index;
 
@@ -112,6 +125,8 @@ pub async fn process_video(
             };
             eprintln!("[timing] chunk_{ci} whisper: {:.1}s ({} segments)", t.elapsed().as_secs_f64(), whisper_segments.len());
 
+            check_cancelled()?;
+
             // Step 2: Extract transcript for vision context
             let transcript = extract_transcript(&whisper_segments);
 
@@ -140,6 +155,8 @@ pub async fn process_video(
                 .await?;
             let n_batches = (artifact.frame_paths.len() + config.vision.max_frames_per_request as usize - 1) / config.vision.max_frames_per_request as usize;
             eprintln!("[timing] chunk_{ci} vision: {:.1}s ({} frames, {} batches, {} segments)", t.elapsed().as_secs_f64(), artifact.frame_paths.len(), n_batches, vision_segments.len());
+
+            check_cancelled()?;
 
             // Build context for next chunk
             prev_context = Some(build_chunk_context(&whisper_segments, &vision_segments));
@@ -479,7 +496,7 @@ mod tests {
             .status()
             .unwrap();
 
-        let timeline = process_video(&config, &video_path, "test-job", false, None).await.unwrap();
+        let timeline = process_video(&config, &video_path, "test-job", false, None, None).await.unwrap();
 
         assert!(!timeline.segments.is_empty());
         assert_eq!(timeline.source, "test.mp4");

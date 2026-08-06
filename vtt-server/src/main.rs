@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use vtt_core::{
     check_ffmpeg, check_ytdlp, download_video, load_config, load_profile, process_video,
@@ -53,6 +54,7 @@ struct JobEntry {
     source: String,
     status: JobStatus,
     error: Option<String>,
+    cancel_token: Option<CancellationToken>,
 }
 
 impl JobEntry {
@@ -94,6 +96,114 @@ impl IntoResponse for ApiError {
     }
 }
 
+// --- Result persistence ---
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JobMeta {
+    id: Uuid,
+    source: String,
+    status: JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn persist_result(
+    results_dir: &str,
+    job_id: Uuid,
+    source: &str,
+    timeline: &Timeline,
+) -> Result<(), std::io::Error> {
+    let dir = std::path::Path::new(results_dir).join(job_id.to_string());
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let timeline_json = serde_json::to_string_pretty(timeline)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let timeline_tmp = dir.join("timeline.json.tmp");
+    let timeline_path = dir.join("timeline.json");
+    tokio::fs::write(&timeline_tmp, &timeline_json).await?;
+    tokio::fs::rename(&timeline_tmp, &timeline_path).await?;
+
+    let meta = JobMeta {
+        id: job_id,
+        source: source.to_string(),
+        status: JobStatus::Completed,
+        error: None,
+    };
+    let meta_json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let meta_tmp = dir.join("job.json.tmp");
+    let meta_path = dir.join("job.json");
+    tokio::fs::write(&meta_tmp, &meta_json).await?;
+    tokio::fs::rename(&meta_tmp, &meta_path).await?;
+
+    Ok(())
+}
+
+async fn load_persisted_results(
+    results_dir: &str,
+) -> (HashMap<Uuid, JobEntry>, HashMap<Uuid, Timeline>) {
+    let mut jobs = HashMap::new();
+    let mut results = HashMap::new();
+    let dir = std::path::Path::new(results_dir);
+
+    if !dir.exists() {
+        return (jobs, results);
+    }
+
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Warning: failed to read results dir: {e}");
+            return (jobs, results);
+        }
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let meta_path = path.join("job.json");
+        let timeline_path = path.join("timeline.json");
+
+        let meta_json = match tokio::fs::read_to_string(&meta_path).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let meta: JobMeta = match serde_json::from_str(&meta_json) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if meta.status != JobStatus::Completed {
+            continue;
+        }
+
+        let timeline_json = match tokio::fs::read_to_string(&timeline_path).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let timeline: Timeline = match serde_json::from_str(&timeline_json) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let job_entry = JobEntry {
+            id: meta.id,
+            source: meta.source,
+            status: JobStatus::Completed,
+            error: None,
+            cancel_token: None,
+        };
+
+        jobs.insert(meta.id, job_entry);
+        results.insert(meta.id, timeline);
+    }
+
+    (jobs, results)
+}
+
 // --- Background processing ---
 
 /// Resolve an optional profile name to a ServerConfig.
@@ -106,35 +216,56 @@ fn resolve_config(base: &ServerConfig, profile: &Option<String>) -> Result<Serve
 }
 
 fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool, source_name: String, config: ServerConfig) {
+    let token = CancellationToken::new();
+
+    {
+        let mut jobs = state.jobs.lock().unwrap();
+        if let Some(entry) = jobs.get_mut(&job_id) {
+            entry.cancel_token = Some(token.clone());
+        }
+    }
+
+    let cancel_token = token;
     tokio::spawn(async move {
         let _permit = state.processing_semaphore.acquire().await.unwrap();
 
         {
             let mut jobs = state.jobs.lock().unwrap();
             if let Some(entry) = jobs.get_mut(&job_id) {
+                if entry.status == JobStatus::Failed {
+                    return; // Already cancelled while queued
+                }
                 entry.status = JobStatus::Processing;
             }
         }
 
         let job_id_str = job_id.to_string();
-        match process_video(&config, &video_path, &job_id_str, force, Some(&source_name)).await {
+        match process_video(&config, &video_path, &job_id_str, force, Some(&source_name), Some(cancel_token)).await {
             Ok(timeline) => {
-                {
-                    let mut results = state.results.lock().unwrap();
-                    results.insert(job_id, timeline);
-                }
                 {
                     let mut jobs = state.jobs.lock().unwrap();
                     if let Some(entry) = jobs.get_mut(&job_id) {
+                        if entry.status == JobStatus::Failed {
+                            return; // Cancelled between last check and completion
+                        }
                         entry.status = JobStatus::Completed;
                     }
                 }
+
+                if let Err(e) = persist_result(&config.processing.results_dir, job_id, &source_name, &timeline).await {
+                    eprintln!("Warning: failed to persist result for {job_id}: {e}");
+                }
+
+                let mut results = state.results.lock().unwrap();
+                results.insert(job_id, timeline);
             }
             Err(e) => {
                 let mut jobs = state.jobs.lock().unwrap();
                 if let Some(entry) = jobs.get_mut(&job_id) {
-                    entry.status = JobStatus::Failed;
-                    entry.error = Some(e.to_string());
+                    if entry.status != JobStatus::Failed {
+                        entry.status = JobStatus::Failed;
+                        entry.error = Some(e.to_string());
+                    }
                 }
             }
         }
@@ -208,6 +339,7 @@ async fn create_job(
         source: request.source.clone(),
         status: JobStatus::Queued,
         error: None,
+        cancel_token: None,
     };
     let response = entry.to_response();
 
@@ -301,6 +433,7 @@ async fn upload_job(
         source: filename.clone(),
         status: JobStatus::Queued,
         error: None,
+        cancel_token: None,
     };
     let response = entry.to_response();
 
@@ -329,6 +462,7 @@ async fn create_url_job(
         source: request.url.clone(),
         status: JobStatus::Queued,
         error: None,
+        cancel_token: None,
     };
     let response = entry.to_response();
 
@@ -347,12 +481,24 @@ async fn create_url_job(
     let max_resolution = request.max_resolution.clone();
     let max_fps = request.max_fps;
 
+    let token = CancellationToken::new();
+    {
+        let mut jobs = state.jobs.lock().unwrap();
+        if let Some(entry) = jobs.get_mut(&job_id) {
+            entry.cancel_token = Some(token.clone());
+        }
+    }
+
+    let cancel_token = token;
     tokio::spawn(async move {
         let _permit = state_clone.processing_semaphore.acquire().await.unwrap();
 
         {
             let mut jobs = state_clone.jobs.lock().unwrap();
             if let Some(entry) = jobs.get_mut(&job_id) {
+                if entry.status == JobStatus::Failed {
+                    return; // Already cancelled while queued
+                }
                 entry.status = JobStatus::Processing;
             }
         }
@@ -376,8 +522,10 @@ async fn create_url_job(
             Err(e) => {
                 let mut jobs = state_clone.jobs.lock().unwrap();
                 if let Some(entry) = jobs.get_mut(&job_id) {
-                    entry.status = JobStatus::Failed;
-                    entry.error = Some(e.to_string());
+                    if entry.status != JobStatus::Failed {
+                        entry.status = JobStatus::Failed;
+                        entry.error = Some(e.to_string());
+                    }
                 }
                 return;
             }
@@ -399,26 +547,35 @@ async fn create_url_job(
             &job_id_str,
             force,
             Some(&source_name),
+            Some(cancel_token),
         )
         .await
         {
             Ok(timeline) => {
                 {
-                    let mut results = state_clone.results.lock().unwrap();
-                    results.insert(job_id, timeline);
-                }
-                {
                     let mut jobs = state_clone.jobs.lock().unwrap();
                     if let Some(entry) = jobs.get_mut(&job_id) {
+                        if entry.status == JobStatus::Failed {
+                            return; // Cancelled between last check and completion
+                        }
                         entry.status = JobStatus::Completed;
                     }
                 }
+
+                if let Err(e) = persist_result(&config_override.processing.results_dir, job_id, &source_name, &timeline).await {
+                    eprintln!("Warning: failed to persist result for {job_id}: {e}");
+                }
+
+                let mut results = state_clone.results.lock().unwrap();
+                results.insert(job_id, timeline);
             }
             Err(e) => {
                 let mut jobs = state_clone.jobs.lock().unwrap();
                 if let Some(entry) = jobs.get_mut(&job_id) {
-                    entry.status = JobStatus::Failed;
-                    entry.error = Some(e.to_string());
+                    if entry.status != JobStatus::Failed {
+                        entry.status = JobStatus::Failed;
+                        entry.error = Some(e.to_string());
+                    }
                 }
             }
         }
@@ -491,13 +648,13 @@ async fn cancel_job(
         .ok_or_else(|| ApiError::NotFound(format!("job not found: {job_id}")))?;
 
     match entry.status {
-        JobStatus::Queued => {
+        JobStatus::Queued | JobStatus::Processing => {
+            if let Some(ref token) = entry.cancel_token {
+                token.cancel();
+            }
             entry.status = JobStatus::Failed;
             entry.error = Some("cancelled by user".into());
             Ok(Json(json!({ "cancelled": job_id.to_string() })))
-        }
-        JobStatus::Processing => {
-            Err(ApiError::Conflict("cannot cancel a job that is currently processing".into()))
         }
         _ => {
             Err(ApiError::Conflict(format!("job already {}",
@@ -514,7 +671,10 @@ async fn cancel_all_jobs(
     let mut cancelled = 0;
 
     for entry in jobs.values_mut() {
-        if entry.status == JobStatus::Queued {
+        if entry.status == JobStatus::Queued || entry.status == JobStatus::Processing {
+            if let Some(ref token) = entry.cancel_token {
+                token.cancel();
+            }
             entry.status = JobStatus::Failed;
             entry.error = Some("cancelled by user".into());
             cancelled += 1;
@@ -541,10 +701,17 @@ async fn main() {
 
     let max_upload = config.processing.max_upload_bytes as usize;
 
+    let (persisted_jobs, persisted_results) =
+        load_persisted_results(&config.processing.results_dir).await;
+    let loaded_count = persisted_jobs.len();
+    if loaded_count > 0 {
+        eprintln!("Loaded {loaded_count} completed result(s) from disk");
+    }
+
     let state = Arc::new(AppState {
         config: config.clone(),
-        jobs: Mutex::new(HashMap::new()),
-        results: Mutex::new(HashMap::new()),
+        jobs: Mutex::new(persisted_jobs),
+        results: Mutex::new(persisted_results),
         processing_semaphore: Semaphore::new(config.server.max_concurrent_jobs as usize),
     });
 

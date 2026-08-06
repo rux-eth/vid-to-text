@@ -78,7 +78,7 @@ impl Default for ClientServerConfig {
     fn default() -> Self {
         Self {
             host: "localhost".to_string(),
-            port: 3000,
+            port: 3001,
         }
     }
 }
@@ -189,6 +189,7 @@ pub struct VisionConfig {
 #[serde(default)]
 pub struct ProcessingConfig {
     pub temp_dir: String,
+    pub results_dir: String,
     pub max_upload_bytes: u64,
     pub cleanup_checkpoints: bool,
 }
@@ -231,7 +232,7 @@ impl Default for ServerListenConfig {
     fn default() -> Self {
         Self {
             listen_address: "0.0.0.0".to_string(),
-            listen_port: 3000,
+            listen_port: 3001,
             max_concurrent_jobs: 1,
         }
     }
@@ -298,8 +299,13 @@ impl Default for VisionConfig {
 
 impl Default for ProcessingConfig {
     fn default() -> Self {
+        let results_dir = dirs::home_dir()
+            .map(|h| h.join(".vid-to-text").join("server").join("results"))
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "/tmp/vtt-results".to_string());
         Self {
             temp_dir: "/tmp/vtt-jobs".to_string(),
+            results_dir,
             max_upload_bytes: 4_294_967_296, // 4 GB
             cleanup_checkpoints: true,
         }
@@ -382,6 +388,11 @@ impl ServerConfig {
         if self.processing.temp_dir.is_empty() {
             return Err(VttError::Config(
                 "processing.temp_dir must not be empty".into(),
+            ));
+        }
+        if self.processing.results_dir.is_empty() {
+            return Err(VttError::Config(
+                "processing.results_dir must not be empty".into(),
             ));
         }
         if self.ytdlp.path.is_empty() {
@@ -546,7 +557,7 @@ mod tests {
     fn test_client_config_default_values() {
         let config = ClientConfig::default();
         assert_eq!(config.server.host, "localhost");
-        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.server.port, 3001);
         assert_eq!(config.output.dir, None);
     }
 
@@ -554,7 +565,7 @@ mod tests {
     fn test_server_config_default_values() {
         let config = ServerConfig::default();
         assert_eq!(config.server.listen_address, "0.0.0.0");
-        assert_eq!(config.server.listen_port, 3000);
+        assert_eq!(config.server.listen_port, 3001);
         assert_eq!(config.ffmpeg.path, "ffmpeg");
         assert_eq!(config.ffmpeg.chunk_duration_secs, 180);
         assert_eq!(config.whisper.language, "en");
@@ -593,7 +604,7 @@ host = "myserver.ts.net"
 "#;
         let config: ClientConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.host, "myserver.ts.net");
-        assert_eq!(config.server.port, 3000);
+        assert_eq!(config.server.port, 3001);
         assert_eq!(config.output.dir, None);
     }
 
@@ -609,7 +620,7 @@ fps = 1.0
         let config: ServerConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.ffmpeg.chunk_duration_secs, 120);
         assert_eq!(config.vision.fps, 1.0);
-        assert_eq!(config.server.listen_port, 3000);
+        assert_eq!(config.server.listen_port, 3001);
         assert_eq!(config.ollama.model, "qwen3-vl:8b");
     }
 
@@ -800,13 +811,13 @@ listen_port = "not a number"
     #[test]
     fn test_client_server_url() {
         let config = ClientConfig::default();
-        assert_eq!(config.server_url(), "http://localhost:3000");
+        assert_eq!(config.server_url(), "http://localhost:3001");
     }
 
     #[test]
     fn test_server_bind_address() {
         let config = ServerConfig::default();
-        assert_eq!(config.bind_address(), "0.0.0.0:3000");
+        assert_eq!(config.bind_address(), "0.0.0.0:3001");
     }
 
     #[test]

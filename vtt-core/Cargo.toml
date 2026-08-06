@@ -16,6 +16,7 @@ whisper-rs = { workspace = true }
 hound = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
