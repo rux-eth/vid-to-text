@@ -1,5 +1,7 @@
 # PR-008+009: Client CLI Commands with File Transfer
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 Combined PR-008 (client commands) and PR-009 (file transfer) — client can't function without upload.

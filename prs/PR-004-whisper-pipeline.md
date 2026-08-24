@@ -1,5 +1,7 @@
 # PR-004: Whisper Pipeline
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 Whisper-based audio transcription pipeline on the server, running on CPU.

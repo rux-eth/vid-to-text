@@ -1,5 +1,7 @@
 # PR-001: Project Skeleton
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 Set up the Rust workspace with two crates and shared types.

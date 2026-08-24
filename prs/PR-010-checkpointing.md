@@ -1,5 +1,7 @@
 # PR-010: Checkpointing and Resumability
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 Chunk-level checkpointing so jobs can resume after failure.

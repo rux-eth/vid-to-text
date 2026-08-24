@@ -12,30 +12,30 @@ Full PR descriptions live in `prs/`. This file is the index.
 
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
-| [PR-001](../prs/PR-001-project-skeleton.md) | Project skeleton — workspace, crates, config types, CLI scaffolding | `[x]` | — |
-| [PR-002](../prs/PR-002-config-system.md) | TOML config loading with CLI flag overrides | `[x]` | PR-001 |
+| [PR-001](../../prs/PR-001-project-skeleton.md) | Project skeleton — workspace, crates, config types, CLI scaffolding | `[x]` | — |
+| [PR-002](../../prs/PR-002-config-system.md) | TOML config loading with CLI flag overrides | `[x]` | PR-001 |
 
 ## Phase 2: Server Core
 
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
-| [PR-003](../prs/PR-003-video-chunking.md) | ffmpeg video chunking — split mp4 into time-based chunks | `[x]` | PR-002 |
-| [PR-004](../prs/PR-004-whisper-pipeline.md) | Whisper pipeline — audio extraction and speech transcription on CPU | `[x]` | PR-003 |
-| [PR-005](../prs/PR-005-vision-pipeline.md) | Qwen3-VL pipeline — frame extraction and visual description via Ollama | `[x]` | PR-003 |
-| [PR-006](../prs/PR-006-timeline-merge.md) | Timeline merge — combine segments from both pipelines, sort, produce JSON | `[x]` | PR-004, PR-005 |
+| [PR-003](../../prs/PR-003-video-chunking.md) | ffmpeg video chunking — split mp4 into time-based chunks | `[x]` | PR-002 |
+| [PR-004](../../prs/PR-004-whisper-pipeline.md) | Whisper pipeline — audio extraction and speech transcription on CPU | `[x]` | PR-003 |
+| [PR-005](../../prs/PR-005-vision-pipeline.md) | Qwen3-VL pipeline — frame extraction and visual description via Ollama | `[x]` | PR-003 |
+| [PR-006](../../prs/PR-006-timeline-merge.md) | Timeline merge — combine segments from both pipelines, sort, produce JSON | `[x]` | PR-004, PR-005 |
 
 ## Phase 3: Client-Server Communication
 
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
-| [PR-007](../prs/PR-007-server-api.md) | Server HTTP API — job submission, status, result retrieval | `[x]` | PR-006 |
-| [PR-008+009](../prs/PR-008-client-and-transfer.md) | Client CLI commands + streaming file transfer (combined) | `[x]` | PR-007 |
+| [PR-007](../../prs/PR-007-server-api.md) | Server HTTP API — job submission, status, result retrieval | `[x]` | PR-006 |
+| [PR-008+009](../../prs/PR-008-client-and-transfer.md) | Client CLI commands + streaming file transfer (combined) | `[x]` | PR-007 |
 
 ## Phase 4: Resilience
 
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
-| [PR-010](../prs/PR-010-checkpointing.md) | Chunk-level checkpointing and job resumability | `[x]` | PR-008+009 |
+| [PR-010](../../prs/PR-010-checkpointing.md) | Chunk-level checkpointing and job resumability | `[x]` | PR-008+009 |
 
 ---
 

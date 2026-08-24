@@ -61,17 +61,32 @@ See `docs/ARCHITECTURE.md` for the full architecture reference.
 
 ## Implementation Status
 
-See `docs/ROADMAP.md` for the ordered PR plan. Full PR descriptions in `prs/`.
+See `docs/0.0/ROADMAP.md` for the ordered PR plan. Full PR descriptions in `prs/`.
 
 **v1 complete.** Post-v1 features added: YouTube URL support, human-readable format command, vision pipeline optimizations.
+
+## Ongoing Behavior (MANDATORY)
+
+- **Every PR runs `PROCEDURE-pr-research.md` before implementation.** No exceptions. Tier-1 PRs get the light path (Phase 1 State Assessment); Tier-2 PRs get the full 5-phase path.
+- **Research findings travel with the PR** — appended to the PR file's `## Research findings` section.
+- **State drifts** — even research-backed decisions need Phase 1 state assessment before implementation.
+- **Every minor/major version bump runs `PROCEDURE-design-planning.md` first.** See `docs/VERSIONING.md`. Patch bumps do not.
+- **Halt at every phase boundary** — per the Per-Phase Approval Gate in `docs/CONSTRAINTS.md`, a response covers at most one phase, then requests approval.
 
 ## Design References
 
 - `docs/ARCHITECTURE.md` — canonical architecture reference
 - `docs/CONSTRAINTS.md` — hard rules
-- `docs/ROADMAP.md` — PR index with phases and dependencies
+- `docs/0.0/ROADMAP.md` — PR index with phases and dependencies
 - `prs/` — full PR descriptions
-- `docs/DESIGN-log.md` — design conversation log
+- `docs/0.0/DESIGN-log.md` — design conversation log (versioned)
+- `docs/0.0/RESEARCH-BACKLOG.md` — per-PR research status + drift watch (versioned)
+- `docs/CONVENTIONS.md` — code conventions (flat, SSOT)
+- `docs/DEPLOYMENT.md` — deploy how-to (flat, SSOT)
+- `docs/VERSIONING.md` — versioning policy + bump rules + changelog format (flat, meta-rule)
+- `/CHANGELOG.md` — user-facing changelog (Keep-a-Changelog 1.1.0)
+- `prs/PR-TEMPLATE.md` — start new PRs from this template
+- `PROCEDURE-pr-research.md` — mandatory research procedure before every PR implementation
 - `PROCEDURE-design-planning.md` — how to run design sessions
 - `PROCEDURE-code-audit.md` — post-design-session code audit
 

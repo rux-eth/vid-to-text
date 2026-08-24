@@ -1,5 +1,7 @@
 # PR-007: Server HTTP API
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 HTTP API on the server for receiving and processing jobs.

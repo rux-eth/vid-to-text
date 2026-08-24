@@ -34,6 +34,56 @@ All configurable values come from config files. Zero hardcoded parameters for be
 
 ---
 
+### Research-Backed Decisions (NON-NEGOTIABLE)
+
+Every architectural and significant design decision must be backed by research from **reputable sources**. "I think this is right" is not sufficient.
+
+**Reputable sources:**
+- Production system documentation
+- Official framework source and docs
+- Published post-mortems and engineering blog posts from serious engineering teams
+- Battle-tested open-source code with meaningful adoption
+
+**Not sufficient:**
+- LLM intuition
+- Marketing pages
+- Personal blog posts without engineering weight
+- StackOverflow answers without corroborating evidence
+
+**Process:** decisions without research backing must be explicitly flagged as unresearched in the relevant PR or design doc, and researched before implementation begins. `docs/0.0/DESIGN-log.md` tracks which decisions have research and which don't. `PROCEDURE-design-planning.md` integrates research rounds into Phase 2 (Decisions).
+
+### PR Research Procedure Required (NON-NEGOTIABLE)
+
+No PR is implemented until `PROCEDURE-pr-research.md` has been followed and its findings are documented in the PR file's `## Research findings` section.
+
+**Applies to all PRs — including PRs that were research-backed at design time.** State drifts between design and implementation. The procedure's Phase 1 (State Assessment) catches drift before implementation begins.
+
+**Enforcement:**
+- Every PR file starts from `prs/PR-TEMPLATE.md`, which includes a `## Before Implementation (NON-NEGOTIABLE)` section requiring this procedure
+- Every PR file has a `## Research findings` section that must be populated before implementation
+- PRs without completed research findings are rejected
+- Research findings include a state-assessment date; if implementation hasn't started within the project's staleness threshold, re-run state assessment per the time-decay policy in `PROCEDURE-pr-research.md`
+
+State drifts. Research must be validated before code.
+
+### Per-Phase Approval Gate (NON-NEGOTIABLE)
+
+In any multi-phase procedure (`PROCEDURE-pr-research.md`, `PROCEDURE-design-planning.md`, future procedures), Claude does **not** advance to the next phase without explicit user approval.
+
+**What this means:**
+- After completing a phase, Claude presents the phase output and explicitly requests permission to enter the next phase.
+- "Auto-flowing" through multiple phases in a single response without user interjection is a hard violation.
+- This applies even when a phase is "light" or no-op — the outcome and rationale are presented and approved before the procedure is treated as advanced.
+- Implementation never begins until Phase 5 (Gate Check) has been explicitly approved.
+
+**Why:** Phases exist to give the user explicit decision points. When Claude advances unilaterally, those decision points are skipped. The user should not have to interrupt to halt phase progression — the default behavior is to halt.
+
+**Enforcement:**
+- Every phase response ends with "Phase X complete. Awaiting approval to enter Phase X+1." (or equivalent.)
+- A response covers at most one phase, then halts.
+
+---
+
 ## Domain Constraints
 
 ### No Audio Data on GPU (v1)
@@ -55,3 +105,17 @@ A chunk checkpoint file is only written after the chunk is fully processed by bo
 ### No Network Calls From Client to Models
 
 The client never communicates directly with Ollama or Whisper. All model interaction goes through the server. This keeps the client thin and the server as the single point of control for processing.
+
+---
+
+## Research Time-Decay
+
+**Project staleness threshold: 30 days.**
+
+Any PR marked `state-assessed` or `fully-researched` in `docs/0.0/RESEARCH-BACKLOG.md` more than 30 days
+before implementation begins must re-run Phase 1 (State Assessment) of `PROCEDURE-pr-research.md`.
+
+Rationale: this project depends on fast-moving external surfaces (Ollama HTTP API, whisper.cpp /
+whisper-rs, vision model releases). A decision researched against one model revision can be invalidated
+by the next. 30 days is the shortest interval that does not force re-assessment within a single work
+session.

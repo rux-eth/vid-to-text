@@ -48,7 +48,7 @@ If the design session changes the scope or ordering of PRs:
 - Create new PR files in `prs/` for any new work items
 - Update existing PR files if scope changed
 - Renumber if dependencies shifted
-- Update `docs/ROADMAP.md` to reference the new PR structure
+- Update `docs/0.0/ROADMAP.md` to reference the new PR structure
 
 ### 6. Update docs
 

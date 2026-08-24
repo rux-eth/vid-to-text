@@ -1,5 +1,7 @@
 # PR-005: Vision Pipeline
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 Qwen3-VL visual description pipeline via Ollama HTTP API.

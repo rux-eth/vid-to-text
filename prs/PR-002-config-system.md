@@ -1,5 +1,7 @@
 # PR-002: Config System
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 TOML config loading with CLI flag overrides for both client and server.

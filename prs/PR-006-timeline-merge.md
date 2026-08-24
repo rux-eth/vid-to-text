@@ -1,5 +1,7 @@
 # PR-006: Timeline Merge
 
+**Landed-in:** v0.0 (untagged — versioning introduced in PR-019)
+
 ## Scope
 
 Pipeline orchestration and timeline merge — combines all processing stages.
