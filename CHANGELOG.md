@@ -22,7 +22,14 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
 - `doctor` and `/health` report the OCR engine when the diagnostic is enabled. (PR-023)
 - OCR-grounded vision prompts (`[vision.ocr_grounding]`): each frame's detected text is given to the
   vision model alongside the image, marked as a fallible reading aid with the image authoritative.
-  Off by default. Addresses measured digit misreads of on-screen values. (PR-024)
+  **Off by default, and measured to make no difference** to factual accuracy on this corpus (n=2
+  videos; +34% runtime), so it is not enabled in the locked profile. Kept because it is cheap to
+  re-test on other content. (PR-024)
+
+- Guard against degenerate vision output (`vision.max_numeric_run`): a visual description that
+  enumerates more than 40 consecutive numbers is truncated at the cap, keeping the legitimate head.
+  Catches both observed modes — an arithmetic ramp and a repeated value — which the existing
+  sentence-repetition guard could not see. (PR-025)
 
 ### Changed
 - OCR engine configuration moved from `[fidelity]` to its own `[ocr]` section, shared by the fidelity

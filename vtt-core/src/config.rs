@@ -367,6 +367,17 @@ pub struct VisionConfig {
     pub adaptive: AdaptiveSamplingConfig,
     /// Give the vision model the text OCR detected in each frame. (PR-024)
     pub ocr_grounding: OcrGroundingConfig,
+    /// Cap on consecutive numeric tokens in a visual description, guarding against
+    /// degenerate enumeration (PR-025). `0` disables.
+    ///
+    /// Vision output sometimes ramps -- a legitimate Fibonacci list running on into
+    /// "1.801, 1.802, 1.803, ..." for 500+ terms -- or repeats one value ("1.738T"
+    /// x40). Neither is visible to `truncate_repetition`, which keys on repeated
+    /// sentences. Measured over 2,433 visual segments from this corpus with the
+    /// same tokenizer the guard uses: legitimate runs top out at 38 while
+    /// degenerate ones start at 166, so 40 sits in the gap and truncates exactly
+    /// the 18 degenerate segments (0.74%).
+    pub max_numeric_run: u32,
 }
 
 /// Content-adaptive frame selection within each chunk (PR-022).
@@ -567,6 +578,7 @@ impl Default for VisionConfig {
             use_transcript: true,
             adaptive: AdaptiveSamplingConfig::default(),
             ocr_grounding: OcrGroundingConfig::default(),
+            max_numeric_run: 40,
         }
     }
 }

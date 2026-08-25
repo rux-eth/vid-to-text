@@ -173,6 +173,20 @@ report it when the diagnostic is enabled in the server's base config.
 thumbnails of every kept frame (`thumbnail_width`, `thumbnail_quality`) so the check and the review
 stay reproducible after the job's working directory is cleaned.
 
+**Vision output guards.** Two run at generation time, before a segment is ever merged (editing after
+merge is forbidden by Segments Are Immutable After Merge):
+
+- `truncate_repetition` — cuts where a sentence of >=15 characters recurs a third time (from `6f10acd`).
+- `truncate_numeric_run` — caps consecutive numeric tokens at `vision.max_numeric_run`, keeping the
+  legitimate head of the list. This catches degeneration the sentence guard cannot see: a real
+  Fibonacci list continuing into "1.801, 1.802, 1.803, ..." for 500+ terms, or one value repeated
+  ("1.738T" x40). Measured over 2,433 visual segments, legitimate runs top out at 38 and degenerate
+  ones start at 166, so the default 40 truncates exactly the 18 degenerate segments. Every truncation
+  is logged with the observed run length. Retrying is not an option: at `ollama.temperature = 0` the
+  existing retry loop reproduces the same output. Compression ratio was measured as an alternative
+  detector and rejected — it flags 12.5% of clean segments at 2.4 while still missing 3 of 18
+  degenerate ones.
+
 **Review.** `vid-to-text review <results-dir>` renders a self-contained HTML sheet — thumbnails,
 description, judged facts — sampled disagreement-first (every fact the metric called unsupported or
 missed, then supported ones), and `--labels` scores the copied judgments: Cohen's κ between metric

@@ -58,6 +58,7 @@ Closing these gaps is **not** in PR-019's scope ("one PR, one thing"). It is a c
 | [PR-019](../../prs/PR-019-vibe-rails-sync.md) | `design-research ✓` (template is the project's own methodology SSOT) | `state-assessed 2026-08-24` | `implementation-cleared 2026-08-24` |
 | [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | `design-research ✓` (session 2026-08-25: CHOCOLATE typology; OCR engine measured on corpus) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
 | [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | `design-research ✓` (Tier A 2026-08-25: OCR-augmented VQA, both directions) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
+| [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | `design-research ✓` (in-repo prior art + threshold measured over 2,423 segments) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
 
 ## Tier 2 — Research-Pending
 

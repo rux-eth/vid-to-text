@@ -130,6 +130,7 @@ ssh-desktop 'cd ~/vid-to-text && cargo run --release -p vtt-server'
   `min_trigger_interval_secs`, `max_frames_per_chunk` — see `docs/ARCHITECTURE.md` § Frame Sampling
 - `ollama.prompt_reserve_tokens` — context reserved for prompt text in the per-request token pre-flight
 - `whisper.repetition_window_secs` — window over which the post-hoc repetition report is scored
+- `vision.max_numeric_run` — cap on consecutive numbers in a visual description, guarding against degenerate enumeration (default 40; 0 disables)
 - `[ocr]` — OCR engine shared by the fidelity diagnostic and OCR grounding (`command`, `workers`, `threads`)
 - `[vision.ocr_grounding]` — give the vision model each frame's detected text (`enabled`, `max_items_per_frame`, `min_score`, `tokens_per_item`) — see `docs/ARCHITECTURE.md` § Frame Sampling
 - `[fidelity]` — post-run visual fidelity diagnostic (`enabled`, `recall_reference`, `number_tolerance`, `min_persist_secs`, `min_text_height_px`, `label_stoplist`, thumbnails) — see `docs/ARCHITECTURE.md` § Fidelity Diagnostic

@@ -132,18 +132,39 @@ Invented values (nothing within 5% on screen) **halve**, 3.4% -> 1.6%, and exact
 The ">5% off" bucket is the least circular of the three, since grounding cannot make a value that is
 absent from the screen appear in the reference.
 
-**Strength of that evidence, stated plainly:** one video, 327 vs 253 numbers. The standard error on a
-3.4% rate at n=327 is ~1.0 pp, so a 1.8 pp difference is **directional, not statistically
-established**. A confirmation run on a second clip is queued. Cost is firm: **+34% wall clock**
-(0.34x -> 0.45x realtime; ~15.4 h -> ~20.4 h over the corpus).
+**The confirmation clip reversed it. Pooled, the effect is nil.** `2024_6_24` (minutes 5-20):
+
+| arm | plain numbers stated | exact match | >5% off (no such value) |
+|---|---|---|---|
+| ungrounded (`3334b1f8`) | 175 | 98.3% | **1.1%** |
+| OCR-grounded (`857f0ff6`) | 114 | 93.0% | **5.3%** |
+
+Opposite direction to clip 1, and larger. Pooling both videos:
+
+| arm | numbers | exact | invented |
+|---|---|---|---|
+| ungrounded | 502 | 93.4% | **2.59%** |
+| OCR-grounded | 367 | 93.5% | **2.72%** |
+
+**No measurable effect on either accuracy measure**, at a firm cost of **+34% wall clock**
+(0.34x -> 0.45x realtime; ~15.4 h -> ~20.4 h over the corpus). The one effect reproducible across
+both clips is that grounding makes the model ~30% terser (327->253, 175->114 numbers stated).
+
+**Conclusion: do not enable.** The capability ships and is off by default; the `exp-ocr-grounded`
+profile carries it for anyone wanting to re-test. The single-video result that motivated enabling it
+(invention 3.4% -> 1.6%) did not replicate and is superseded by this line.
+
+**Why it plausibly does no good**: precision under grounding reached 0.871, not ~1.0, even though the
+score is computed against the very text the model was given. The model largely does not use the
+supplied OCR — which is what the prompt's "the images are authoritative" framing asked for, and which
+also removes the mechanism by which it could have helped.
 
 **Circularity behaved better than feared.** Grounded precision reached 0.871, not ~1.0 — the model
 does not parrot the supplied text, which is what the prompt's framing asked for. It also states 23%
 fewer numbers.
 
-**Not enabled in the locked profile by this PR.** The capability ships off by default; `exp-ocr-grounded`
-carries it for the A/B. Turning it on for the corpus is a cost/benefit call for the operator, recorded
-with the numbers above.
+**Not enabled in the locked profile.** Per the pooled result above, enabling it is not supported by
+evidence; it stays off.
 
 ---
 
@@ -200,8 +221,10 @@ circularity note).
 
 ## Research backing
 
-Tier-1, above: motivation measured on this corpus; mechanism proven with a documented failure mode that
-the design mitigates; benefit on this corpus pending the independent check.
+Tier-1, above: motivation measured on this corpus; mechanism proven in the literature with a
+documented failure mode that the design mitigates. **Benefit on this corpus: measured, and null**
+(n=2 videos, 869 stated numbers). The published gains (Qwen2.5-VL-7B 198 -> 212 on KOCRBench) are on
+document VQA with a question to answer; open-ended description of a chart appears not to transfer.
 
 ## Notes
 

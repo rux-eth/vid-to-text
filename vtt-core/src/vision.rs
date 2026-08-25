@@ -72,6 +72,8 @@ pub struct OllamaClient {
     balanced_batches: bool,
     /// OCR-grounded prompts (PR-024).
     grounding: OcrGroundingConfig,
+    /// Degenerate-enumeration cap (PR-025).
+    max_numeric_run: usize,
 }
 
 impl OllamaClient {
@@ -100,6 +102,7 @@ impl OllamaClient {
             use_transcript: vision_config.use_transcript,
             balanced_batches: vision_config.adaptive.enabled,
             grounding: vision_config.ocr_grounding.clone(),
+            max_numeric_run: vision_config.max_numeric_run as usize,
         })
     }
 
@@ -252,7 +255,16 @@ impl OllamaClient {
                                 batch_idx, desc.len(), cleaned.len()
                             );
                         }
-                        description = Some(cleaned);
+                        // Degenerate numeric enumeration: no sentence repeats, so
+                        // truncate_repetition cannot see it. (PR-025)
+                        let (guarded, run) = truncate_numeric_run(&cleaned, self.max_numeric_run);
+                        if run > 0 {
+                            eprintln!(
+                                "[vision] batch {} enumerated {} consecutive numbers (cap {}), truncated from {} to {} chars",
+                                batch_idx, run, self.max_numeric_run, cleaned.len(), guarded.len()
+                            );
+                        }
+                        description = Some(guarded);
                         break;
                     }
                     Err(_) if attempt < 2 => {
@@ -391,6 +403,94 @@ fn load_prompt_template(path: &Option<String>, default_prompt: &str) -> Result<S
             .map_err(|e| VttError::Vision(format!("failed to read prompt template '{p}': {e}"))),
         _ => Ok(default_prompt.to_string()),
     }
+}
+
+/// Truncate a degenerate numeric enumeration, keeping the legitimate prefix. (PR-025)
+///
+/// Vision output degenerates in two measured ways, neither visible to
+/// `truncate_repetition` (which keys on repeated sentences): it continues a real
+/// list of chart levels into a generated ramp -- "0, 0.25, 0.5, 0.618, 0.786, 1,
+/// 1.272, 1.382, 1.493, 1.618, 1.738" running on into "1.801, 1.802, 1.803, ..."
+/// for 500+ terms, 82% of the segment's words -- or repeats one value ("1.738T,
+/// 1.738T, ..." x40). Capping the run length catches both.
+///
+/// A "run" is consecutive numeric tokens separated only by whitespace, commas or
+/// semicolons. When a run exceeds `max_run` tokens the text is cut at the start of
+/// the first token past the cap, so the legitimate head of the list survives.
+/// Returns the text unchanged when `max_run` is 0 or no run exceeds it.
+pub fn truncate_numeric_run(text: &str, max_run: usize) -> (String, usize) {
+    if max_run == 0 {
+        return (text.to_string(), 0);
+    }
+    let b = text.as_bytes();
+    // A numeric token: optional sign/currency, digits, grouped or decimal digits,
+    // optional unit suffix. Returns its end offset when one starts exactly at `i`.
+    let number_end = |mut i: usize| -> Option<usize> {
+        if i < b.len() && (b[i] == b'-' || b[i] == b'+') {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'$' {
+            i += 1;
+        }
+        let digits = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digits {
+            return None;
+        }
+        while i + 1 < b.len() && (b[i] == b',' || b[i] == b'.') && b[i + 1].is_ascii_digit() {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        if i < b.len() && matches!(b[i], b'%' | b'k' | b'K' | b'M' | b'B' | b'T') {
+            i += 1;
+        }
+        Some(i)
+    };
+
+    let mut toks: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        let at_boundary = i == 0 || !b[i - 1].is_ascii_alphanumeric();
+        if at_boundary {
+            if let Some(end) = number_end(i) {
+                toks.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    // Two numeric tokens belong to the same run when only whitespace, commas or
+    // semicolons separate them; any word between them starts a new run.
+    let joined = |a: usize, c: usize| -> bool {
+        let gap = &text[toks[a].1..toks[c].0];
+        !gap.is_empty() && gap.chars().all(|ch| ch.is_whitespace() || ch == ',' || ch == ';')
+    };
+    let mut run_start = 0usize;
+    for k in 0..toks.len() {
+        if k > 0 && !joined(k - 1, k) {
+            run_start = k;
+        }
+        if k - run_start + 1 > max_run {
+            let mut last = k;
+            while last + 1 < toks.len() && joined(last, last + 1) {
+                last += 1;
+            }
+            let total = last - run_start + 1;
+            let head = text[..toks[k].0]
+                .trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
+            let mut out = head.to_string();
+            if !out.ends_with('.') && !out.ends_with(')') {
+                out.push_str(" ...");
+            }
+            return (out, total);
+        }
+    }
+    (text.to_string(), 0)
 }
 
 /// Detect and truncate repetitive model output (generation loops).
@@ -1087,5 +1187,86 @@ mod tests {
         vision.max_frames_per_request = 30;
         let msg = check_context_budget(&ollama, &vision, 1920, 1080).unwrap_err().to_string();
         assert!(msg.contains("Lower vision.max_frames_per_request to 22"), "{msg}");
+    }
+    // --- PR-025: degenerate numeric enumeration ---
+
+    /// The real clip900 failure, verbatim: a legitimate Fibonacci list that runs on
+    /// into a constant +0.001 ramp. The legitimate head must survive.
+    #[test]
+    fn test_truncate_numeric_run_on_the_real_degenerate_text() {
+        let mut text = String::from(
+            "The chart is populated with numerous horizontal lines representing key Fibonacci \
+             retracement levels (e.g., 0, 0.25, 0.5, 0.618, 0.786, 1, 1.272, 1.382, 1.493, 1.618, 1.738",
+        );
+        let mut v = 1.801_f64;
+        for _ in 0..130 {
+            text.push_str(&format!(", {v:.3}"));
+            v += 0.001;
+        }
+        text.push_str(") and a blue trendline.");
+        let (out, run) = truncate_numeric_run(&text, 24);
+        assert!(run > 130, "reports the observed run length, got {run}");
+        assert!(out.len() < text.len() / 3, "the ramp is gone: {} -> {}", text.len(), out.len());
+        for keep in ["0.618", "0.786", "1.272", "1.382", "1.493", "1.618", "1.738"] {
+            assert!(out.contains(keep), "legitimate level {keep} was cut: {out}");
+        }
+        assert!(!out.contains("1.877") && !out.contains("1.928"), "ramp tail survived: {out}");
+        assert!(out.starts_with("The chart is populated"));
+    }
+
+    /// Headroom check: the longest run in any non-degenerate segment measured on
+    /// this corpus is 19, so a 19-number list must pass untouched at the default.
+    #[test]
+    fn test_truncate_numeric_run_leaves_legitimate_lists_alone() {
+        let axis: Vec<String> = (0..19).map(|i| format!("{}", 63850 + i * 700)).collect();
+        let text = format!("The price axis shows {} in USD.", axis.join(", "));
+        let (out, run) = truncate_numeric_run(&text, 24);
+        assert_eq!(run, 0, "19 numbers is under the cap");
+        assert_eq!(out, text);
+
+        // prose with scattered numbers is never a run
+        let prose = "Price rose to 71958 before falling to 71580, a drop of 0.76% over 4 hours.";
+        assert_eq!(truncate_numeric_run(prose, 24), (prose.to_string(), 0));
+
+        // disabled
+        let long: Vec<String> = (0..100).map(|i| i.to_string()).collect();
+        let t = long.join(", ");
+        assert_eq!(truncate_numeric_run(&t, 0), (t.clone(), 0));
+        assert!(truncate_numeric_run(&t, 24).1 >= 100);
+    }
+
+    /// The default cap comes from measuring 2,433 visual segments with this same
+    /// tokenizer: legitimate runs top out at 38, degenerate ones start at 166.
+    #[test]
+    fn test_default_cap_sits_in_the_measured_gap() {
+        let cap = VisionConfig::default().max_numeric_run as usize;
+        assert_eq!(cap, 40);
+        let longest_legit: Vec<String> = (0..38).map(|i| format!("{}.{}T", 1 + i / 10, i % 10)).collect();
+        let text = format!("Levels: {}.", longest_legit.join(", "));
+        assert_eq!(truncate_numeric_run(&text, cap), (text.clone(), 0), "38 is the longest legitimate run observed");
+        let shortest_degen: Vec<String> = (0..166).map(|i| format!("{}.{}", 1 + i / 100, i % 100)).collect();
+        let d = format!("Levels: {}.", shortest_degen.join(", "));
+        assert_eq!(truncate_numeric_run(&d, cap).1, 166, "the shortest degenerate run observed is caught");
+    }
+
+    /// The second degeneration mode: one value repeated rather than a ramp.
+    #[test]
+    fn test_truncate_numeric_run_catches_repeated_value_mode() {
+        let text = format!("levels (e.g., 0.5, 0.618, {}) and a trendline.", vec!["1.738T"; 60].join(", "));
+        let (out, run) = truncate_numeric_run(&text, 40);
+        assert!(run >= 60, "got {run}");
+        assert!(out.starts_with("levels (e.g., 0.5, 0.618"));
+        assert!(out.len() < text.len());
+    }
+
+    #[test]
+    fn test_truncate_numeric_run_handles_units_and_multibyte() {
+        let mut v: Vec<String> = (0..40).map(|i| format!("{}.{}T", 1 + i / 10, i % 10)).collect();
+        v.insert(0, "2.514T".into());
+        let text = format!("Levels: {} \u{b7} done.", v.join(", "));
+        let (out, run) = truncate_numeric_run(&text, 24);
+        assert!(run >= 40, "got {run}");
+        assert!(out.starts_with("Levels: 2.514T"));
+        assert!(out.len() < text.len());
     }
 }
