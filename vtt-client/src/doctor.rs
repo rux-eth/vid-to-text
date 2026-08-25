@@ -82,6 +82,22 @@ pub async fn run_doctor(config: &ClientConfig) {
                 println!("[!!] ollama: {}", health.ollama);
             }
 
+            // yt-dlp
+            if let Some(v) = health.ytdlp.get("version") {
+                println!("[ok] yt-dlp: {}", v.as_str().unwrap_or("unknown"));
+            } else if let Some(err) = health.ytdlp.get("error") {
+                println!("[!!] yt-dlp: {}", err.as_str().unwrap_or("error"));
+            }
+
+            // OCR (fidelity diagnostic, PR-023)
+            if health.ocr == serde_json::json!("disabled") {
+                println!("[--] ocr: fidelity diagnostic disabled on server");
+            } else if let Some(v) = health.ocr.get("version") {
+                println!("[ok] ocr: {}", v.as_str().unwrap_or("unknown"));
+            } else if let Some(err) = health.ocr.get("error") {
+                println!("[!!] ocr: {}", err.as_str().unwrap_or("error"));
+            }
+
             // overall
             if health.status == "ok" {
                 println!("\nAll systems operational.");

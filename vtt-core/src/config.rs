@@ -138,6 +138,125 @@ pub struct ServerConfig {
     pub vision: VisionConfig,
     pub processing: ProcessingConfig,
     pub ytdlp: YtDlpConfig,
+    pub ocr: OcrConfig,
+    pub fidelity: FidelityConfig,
+}
+
+/// The OCR engine, shared by the fidelity diagnostic (PR-023) and OCR-grounded
+/// vision prompts (PR-024). The command takes `--workers N --threads T` and image
+/// paths, and prints one JSON record per frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OcrConfig {
+    /// argv prefix; default is the repo's RapidOCR wrapper, resolved relative to
+    /// the server's working directory.
+    pub command: Vec<String>,
+    /// Parallel OCR processes.
+    pub workers: u32,
+    /// Inference threads per process. onnxruntime's default takes every core per
+    /// session, so workers only serialise without this (measured 1.85 -> 0.5 s
+    /// per 1080p frame at 8 x 2 on 32 cores).
+    pub threads: u32,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        Self {
+            command: vec!["python3".to_string(), "tools/ocr_frames.py".to_string()],
+            workers: 4,
+            threads: 2,
+        }
+    }
+}
+
+/// OCR-grounded vision prompts (PR-024): the text detected in each frame is given
+/// to the vision model alongside the image.
+///
+/// Measured motivation: the model misreads on-screen digits (`70708` for a true
+/// `O71708`) because Qwen3-VL quantises a 1080p frame into 32x32 px cells while
+/// chart header glyphs are ~10 px tall -- the digits are smaller than one visual
+/// token. OCR text is a *visual* signal from the frame's own timestamp, so it
+/// costs nothing in look-ahead freedom or audio independence.
+///
+/// The prompt marks this text as fallible and the image as authoritative: OCR
+/// error propagation is the documented failure mode of OCR-augmented prompting,
+/// and this project's own engine misread `65018` / `64498` on this corpus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OcrGroundingConfig {
+    pub enabled: bool,
+    /// Cap on OCR items quoted per frame, in reading order.
+    pub max_items_per_frame: u32,
+    /// Minimum OCR confidence for an item to be quoted.
+    pub min_score: f64,
+    /// Prompt-token allowance per quoted item, used by the context pre-flight.
+    pub tokens_per_item: u32,
+}
+
+impl Default for OcrGroundingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_items_per_frame: 60,
+            min_score: 0.5,
+            tokens_per_item: 12,
+        }
+    }
+}
+
+/// Which frames the recall reference is built from. (PR-023)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallReference {
+    /// OCR of the frames the model saw. Cheap; the per-job diagnostic.
+    Kept,
+    /// OCR of every candidate frame at `vision.fps` -- what was on screen. The
+    /// study mode: identical across sampling settings, so recall differences
+    /// between settings are meaningful.
+    Candidates,
+}
+
+/// Post-run visual fidelity diagnostic (PR-023): checks each visual segment's
+/// stated facts (numbers, tickers, timeframes) against OCR of its own source
+/// frames. Diagnoses; never edits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FidelityConfig {
+    pub enabled: bool,
+    pub recall_reference: RecallReference,
+    /// Relative tolerance added to the precision rule when matching a stated
+    /// number to an on-screen number. 0 = the stated number's own precision only.
+    pub number_tolerance: f64,
+    /// A reference fact is "prominent" if it persists at least this long
+    /// across the reference frames of a segment's window...
+    pub min_persist_secs: f64,
+    /// ...and its OCR box is at least this tall in source pixels.
+    pub min_text_height_px: u32,
+    /// Uppercase tokens that are prose, not on-screen labels ("US dollars",
+    /// "THE chart"), excluded from fact extraction.
+    pub label_stoplist: Vec<String>,
+    /// Width of the kept-frame thumbnails stored with results.
+    pub thumbnail_width: u32,
+    /// JPEG quality (ffmpeg -q:v, 2 best .. 31 worst) for thumbnails.
+    pub thumbnail_quality: u32,
+}
+
+impl Default for FidelityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            recall_reference: RecallReference::Kept,
+            number_tolerance: 0.0,
+            min_persist_secs: 5.0,
+            min_text_height_px: 10,
+            label_stoplist: ["THE", "AND", "OR", "OF", "TO", "IN", "ON", "AT", "BY", "FOR", "WITH", "FROM", "AS", "IS", "ARE", "IT", "US", "A", "AN"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            thumbnail_width: 640,
+            thumbnail_quality: 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,6 +365,8 @@ pub struct VisionConfig {
     /// Content-adaptive frame selection. Disabled by default, so every numeric
     /// `fps` profile keeps its exact previous behaviour. (PR-022)
     pub adaptive: AdaptiveSamplingConfig,
+    /// Give the vision model the text OCR detected in each frame. (PR-024)
+    pub ocr_grounding: OcrGroundingConfig,
 }
 
 /// Content-adaptive frame selection within each chunk (PR-022).
@@ -359,6 +480,8 @@ impl Default for ServerConfig {
             vision: VisionConfig::default(),
             processing: ProcessingConfig::default(),
             ytdlp: YtDlpConfig::default(),
+            ocr: OcrConfig::default(),
+            fidelity: FidelityConfig::default(),
         }
     }
 }
@@ -443,6 +566,7 @@ impl Default for VisionConfig {
             transcript_window: TranscriptWindow::Full,
             use_transcript: true,
             adaptive: AdaptiveSamplingConfig::default(),
+            ocr_grounding: OcrGroundingConfig::default(),
         }
     }
 }
@@ -572,6 +696,50 @@ impl ServerConfig {
             return Err(VttError::Config(
                 "whisper.repetition_window_secs must be greater than 0".into(),
             ));
+        }
+        if self.fidelity.enabled || self.vision.ocr_grounding.enabled {
+            if self.ocr.command.is_empty() {
+                return Err(VttError::Config("ocr.command must not be empty".into()));
+            }
+            if self.ocr.workers == 0 {
+                return Err(VttError::Config("ocr.workers must be greater than 0".into()));
+            }
+            if self.ocr.threads == 0 {
+                return Err(VttError::Config("ocr.threads must be greater than 0".into()));
+            }
+        }
+        if self.vision.ocr_grounding.enabled {
+            let g = &self.vision.ocr_grounding;
+            if g.max_items_per_frame == 0 {
+                return Err(VttError::Config(
+                    "vision.ocr_grounding.max_items_per_frame must be greater than 0".into(),
+                ));
+            }
+            if !(g.min_score >= 0.0 && g.min_score <= 1.0) {
+                return Err(VttError::Config(
+                    "vision.ocr_grounding.min_score must be in [0, 1]".into(),
+                ));
+            }
+            if g.tokens_per_item == 0 {
+                return Err(VttError::Config(
+                    "vision.ocr_grounding.tokens_per_item must be greater than 0".into(),
+                ));
+            }
+        }
+        if self.fidelity.enabled {
+            let f = &self.fidelity;
+            if f.number_tolerance < 0.0 {
+                return Err(VttError::Config("fidelity.number_tolerance must not be negative".into()));
+            }
+            if f.min_persist_secs < 0.0 {
+                return Err(VttError::Config("fidelity.min_persist_secs must not be negative".into()));
+            }
+            if f.thumbnail_width == 0 {
+                return Err(VttError::Config("fidelity.thumbnail_width must be greater than 0".into()));
+            }
+            if f.thumbnail_quality == 0 || f.thumbnail_quality > 31 {
+                return Err(VttError::Config("fidelity.thumbnail_quality must be between 1 and 31".into()));
+            }
         }
         if self.vision.max_tokens == 0 {
             return Err(VttError::Config(
@@ -1319,5 +1487,59 @@ max_frames_per_chunk = 45
             );
         }
         cfg.validate().unwrap();
+    }
+    // --- PR-023: fidelity config ---
+
+    #[test]
+    fn test_fidelity_absent_means_disabled_and_table_parses() {
+        let config: ServerConfig = toml::from_str("[vision]\nfps = 2.0\n").unwrap();
+        assert!(!config.fidelity.enabled);
+        assert_eq!(config.fidelity.recall_reference, RecallReference::Kept);
+        let config: ServerConfig = toml::from_str(
+            "[ocr]\ncommand = [\"/v/bin/python\", \"/r/tools/ocr_frames.py\"]\n[fidelity]\nenabled = true\nrecall_reference = \"candidates\"\nnumber_tolerance = 0.002\n",
+        )
+        .unwrap();
+        assert!(config.fidelity.enabled);
+        assert_eq!(config.ocr.command[0], "/v/bin/python");
+        assert_eq!(config.fidelity.recall_reference, RecallReference::Candidates);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_fidelity_validation_only_when_enabled() {
+        let mut config = ServerConfig::default();
+        config.ocr.command.clear();
+        assert!(config.validate().is_ok(), "disabled: not validated");
+        config.fidelity.enabled = true;
+        assert!(config.validate().unwrap_err().to_string().contains("ocr.command"));
+        config.ocr.command = vec!["x".into()];
+        config.fidelity.thumbnail_quality = 40;
+        assert!(config.validate().unwrap_err().to_string().contains("thumbnail_quality"));
+    }
+    /// PR-024: grounding is off unless asked for, and it shares the [ocr] engine
+    /// config with the diagnostic.
+    #[test]
+    fn test_ocr_grounding_defaults_and_validation() {
+        let config = ServerConfig::default();
+        assert!(!config.vision.ocr_grounding.enabled);
+        assert_eq!(config.vision.ocr_grounding.max_items_per_frame, 60);
+        assert!(config.validate().is_ok());
+
+        let config: ServerConfig = toml::from_str(
+            "[vision.ocr_grounding]\nenabled = true\nmax_items_per_frame = 40\nmin_score = 0.6\n",
+        )
+        .unwrap();
+        assert!(config.vision.ocr_grounding.enabled);
+        assert_eq!(config.vision.ocr_grounding.max_items_per_frame, 40);
+        // enabling grounding alone requires the shared OCR engine to be configured
+        let mut bad = config.clone();
+        bad.ocr.command.clear();
+        assert!(bad.validate().unwrap_err().to_string().contains("ocr.command"));
+        let mut bad = config.clone();
+        bad.vision.ocr_grounding.min_score = 1.5;
+        assert!(bad.validate().unwrap_err().to_string().contains("min_score"));
+        let mut bad = config;
+        bad.vision.ocr_grounding.max_items_per_frame = 0;
+        assert!(bad.validate().unwrap_err().to_string().contains("max_items_per_frame"));
     }
 }

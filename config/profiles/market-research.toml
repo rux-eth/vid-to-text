@@ -95,3 +95,12 @@ repetition_report_thold = 2.4
 # 2024_2_12 ("So let's go to the 4th hour." x15: 0.85 per segment, 4.90 per
 # window). Closes the calibration item PR-020 deferred. (PR-022)
 repetition_window_secs = 30.0
+
+[fidelity]
+# Post-run visual fidelity diagnostic (PR-023): each visual segment's stated
+# numbers, tickers and timeframes are checked against OCR (RapidOCR) of the
+# frames it was generated from; the summary lands in the timeline's `fidelity`
+# block and the detail in fidelity.json beside the results. Diagnoses only.
+# The OCR command itself is machine-specific and lives in server.toml.
+enabled = true
+recall_reference = "kept"

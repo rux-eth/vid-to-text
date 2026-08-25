@@ -90,6 +90,23 @@ window (`transcript_for_window`), so they are what enforces Corpus Look-Ahead Fr
 batch. Qwen3-VL's own processor interleaves `<X.X seconds>` text before each frame's vision tokens, and
 Ollama renders all images before the message text, so ordered labels are the faithful equivalent.
 
+**OCR grounding** (`vision.ocr_grounding`, off by default). With it on, each frame's line also carries
+the text OCR read from that frame — items above `min_score`, in reading order, capped at
+`max_items_per_frame` — and the prompt states that OCR is a reading aid which can misread digits, that
+the images are authoritative, and that nothing may be reported which is not visible in the image.
+
+*Why.* The model misreads on-screen digits rather than inventing them: measured on this corpus it wrote
+`70708` for a header reading `O71708`, and `71948` for `H71958`. Qwen3-VL quantises a 1080p frame into
+32x32 px cells (2,042 visual tokens) while TradingView header glyphs are ~10 px tall, so the digits are
+smaller than one visual token. OCR text is a *visual* signal taken from the frame's own timestamp, so
+unlike transcript conditioning it costs nothing in look-ahead freedom or audio independence. Published
+support and its documented failure mode (error propagation from a weak OCR engine) are cited in
+`prs/PR-024-ocr-grounded-vision-prompt.md`.
+
+*Cost.* OCR runs once per job, pre-spawned one chunk ahead so it overlaps GPU work (the pattern already
+used for Whisper), and the result is reused by the fidelity diagnostic instead of being recomputed. The
+per-request context pre-flight adds `max_items_per_frame x tokens_per_item x max_frames_per_request`.
+
 **Token ceiling per request.** Ollama sends frames at native resolution; measured on the deployed
 stack, a frame costs `⌈w/32⌉·⌈h/32⌉ + 2` tokens (1080p = 2,042, 720p = 882, 360p = 222). Before any
 GPU time is spent, the pipeline probes the source resolution and rejects a job whose
@@ -109,6 +126,62 @@ computable from duration alone; the frame count alone does not predict it.
 **Provenance.** `Timeline.capture` records the sampling parameters, models, chunking and transcript
 settings; every visual segment records the timestamps of the frames it was generated from
 (`frames`). Both are omitted when absent, so older timelines and checkpoints load unchanged.
+
+## Fidelity Diagnostic
+
+A post-run check of what each visual segment **says** against what was **on screen**, made possible
+by PR-022's provenance (`Segment.frames`). Configured under `[fidelity]`; off by default; diagnoses
+only and never edits a segment (Segments Are Immutable After Merge).
+
+**Facts.** The OCR-checkable classes of the CHOCOLATE chart-caption error typology (Huang et al.,
+ACL 2024): numeric values (`42,000`, `$1.66T`, `44k`, `-0.25%`), labels (uppercase on-screen tokens —
+tickers, exchanges, indicators) and timeframes (`15m`, `4H`, `1D`, `1W`, `1M`). Trend and magnitude
+claims cannot be checked from a screenshot and are not scored; dates, spelled-out numbers and
+mixed-case names are not yet extracted (documented in `vtt-core/src/fidelity.rs`).
+
+**Matching.** A stated number matches an on-screen number when the difference is within half of the
+stated number's own last digit — `1.66T` matches 1.661T, `42,000` matches 41,958, `70142` only
+70142 — plus an optional relative `number_tolerance`. Plain integers ("2020", "1") are exact; only grouped or suffixed integers ("42,000", "44k") round
+to their last digit. Percentages only match percentages; labels and timeframes match exactly after
+normalisation, and uppercase prose words (`label_stoplist`: THE, US, …) are not treated as labels.
+
+**Two references.** *Precision* is scored against OCR of the frames the segment was generated from
+(a stated fact absent from them is a hallucination — or an OCR miss, which the review sheet exists
+to expose). *Recall* is scored against prominent facts in the configured reference:
+`recall_reference = "kept"` (the same frames; the per-job diagnostic) or `"candidates"` (OCR of every
+candidate frame in the window — what was actually on screen, identical across sampling settings and
+therefore the study mode). Prominent = persisted ≥ `min_persist_secs` across the window's reference
+frames and OCR box height ≥ `min_text_height_px`.
+
+**OCR.** An external command (`[ocr].command`, default the repo's `tools/ocr_frames.py` wrapping
+RapidOCR — PP-OCR models on ONNX Runtime, CPU) prints one JSON record per frame; `[ocr].workers`
+processes × `[ocr].threads` inference threads each (onnxruntime's default takes every core per
+session, so parallel workers only serialise without the bound — measured 1.85 → 0.5 s per 1080p frame
+at 8 × 2 on 32 cores). The same `[ocr]` engine serves the diagnostic and OCR grounding, and each job
+OCRs its frames once.
+
+**Circularity, when grounding is on.** If the vision prompt was grounded on OCR, precision is scored
+against the same text the model was given, so it approaches 1.0 by construction and is **not** evidence
+of accuracy. `FidelitySummary.ocr_grounded` records this and the log line says so; validating grounding
+requires reading frames by hand. Chosen by
+measurement on this corpus: 76/76 legible price-axis values recovered vs 42/76 with digit
+substitutions for tesseract 4.1.1 (`docs/0.0/DESIGN-log.md`, 2026-08-25). `/health` and `doctor`
+report it when the diagnostic is enabled in the server's base config.
+
+**Outputs.** `Timeline.fidelity` carries the summary (reference, counts, precision, recall, F0.5);
+`fidelity.json` beside the results carries per-segment detail; `frames/` beside the results holds
+thumbnails of every kept frame (`thumbnail_width`, `thumbnail_quality`) so the check and the review
+stay reproducible after the job's working directory is cleaned.
+
+**Review.** `vid-to-text review <results-dir>` renders a self-contained HTML sheet — thumbnails,
+description, judged facts — sampled disagreement-first (every fact the metric called unsupported or
+missed, then supported ones), and `--labels` scores the copied judgments: Cohen's κ between metric
+and reviewer, the reviewer's precision, false hallucinations (OCR/matching misses) and missed
+hallucinations (matches to the wrong number). The metric is not trusted for tuning until that κ has
+been reported.
+`vid-to-text rescore <results-dir>` recomputes a report offline from the persisted kept-frame OCR
+(`ocr.json`) — against a candidates reference (raw wrapper output for uniformly spaced frames) or
+with a different tolerance — without touching the GPU; the sampling study is scored that way.
 
 ## Key Abstractions
 

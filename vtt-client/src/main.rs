@@ -3,6 +3,7 @@ mod cache;
 mod doctor;
 mod format;
 mod process;
+mod review;
 
 use std::path::PathBuf;
 
@@ -55,6 +56,66 @@ enum Commands {
 
     /// Check system dependencies and configuration
     Doctor,
+
+    /// Render a fidelity review sheet for a job's results directory, or score a labels file
+    Review {
+        /// Job results directory containing timeline.json, fidelity.json and frames/
+        job_dir: PathBuf,
+
+        /// Output HTML path (default: <job_dir>/review.html)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Number of items to put on the sheet, disagreement-first
+        #[arg(long, default_value_t = 150)]
+        sample: usize,
+
+        /// Thumbnails shown per segment
+        #[arg(long, default_value_t = 4)]
+        thumbs: usize,
+
+        /// Maximum items taken from any one segment
+        #[arg(long, default_value_t = 12)]
+        per_segment: usize,
+
+        /// Labels JSON copied from a completed sheet; prints agreement instead of rendering
+        #[arg(long)]
+        labels: Option<PathBuf>,
+    },
+
+    /// Recompute a job's fidelity report offline (different tolerance, or a candidates reference)
+    Rescore {
+        /// Job results directory containing timeline.json and ocr.json
+        job_dir: PathBuf,
+
+        /// Raw OCR wrapper output (JSON lines) for uniformly spaced candidate frames
+        #[arg(long)]
+        candidates: Option<PathBuf>,
+
+        /// Timestamp of the first candidate frame, seconds
+        #[arg(long, default_value_t = 0.0)]
+        candidate_start: f64,
+
+        /// Candidate frame rate
+        #[arg(long, default_value_t = 2.0)]
+        candidate_fps: f64,
+
+        /// Override fidelity.number_tolerance
+        #[arg(long)]
+        tolerance: Option<f64>,
+
+        /// Override fidelity.min_persist_secs
+        #[arg(long)]
+        min_persist: Option<f64>,
+
+        /// Override fidelity.min_text_height_px
+        #[arg(long)]
+        min_height: Option<u32>,
+
+        /// Write the full report to this path
+        #[arg(long)]
+        write: Option<PathBuf>,
+    },
 
     /// Cancel queued jobs on the server
     Cancel {
@@ -265,6 +326,18 @@ async fn main() {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
+            }
+        }
+        Commands::Rescore { job_dir, candidates, candidate_start, candidate_fps, tolerance, min_persist, min_height, write } => {
+            if let Err(e) = review::run_rescore(job_dir, candidates.as_deref(), *candidate_start, *candidate_fps, *tolerance, *min_persist, *min_height, write.as_deref()) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Review { job_dir, output, sample, thumbs, per_segment, labels } => {
+            if let Err(e) = review::run_review(job_dir, output.as_deref(), *sample, *per_segment, *thumbs, labels.as_deref()) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
             }
         }
         Commands::Format {

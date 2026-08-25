@@ -24,6 +24,11 @@ pub struct HealthResponse {
     pub status: String,
     pub ffmpeg: serde_json::Value,
     pub ollama: serde_json::Value,
+    #[serde(default)]
+    pub ytdlp: serde_json::Value,
+    /// "disabled", {"version": ...} or {"error": ...} (PR-023).
+    #[serde(default)]
+    pub ocr: serde_json::Value,
 }
 
 /// Upload an mp4 file to the server and return the job response.

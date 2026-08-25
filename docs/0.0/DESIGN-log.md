@@ -281,3 +281,89 @@ fixed mode).
   timelines + runner skip logic; server `job.json` records no profile).
 - `CHANGELOG.md`: Unreleased entry.
 - `CLAUDE.md`: Key Configuration updated for `[vision.adaptive]`.
+
+## Session: 2026-08-25 — Visual Fidelity Metric and Sampling Tune (PR-023)
+
+### Context
+
+PR-022 shipped content-adaptive sampling with values that are measured on the corpus but not
+*optimised*: no metric could score description quality across sampling regimes (PR-020 Phase 5.5
+Finding 1; PR-022 Tier C harness). PR-022's provenance changes that — every visual segment now
+records the exact frames it came from, and chart screens are mostly text and numbers, so a
+description can be checked against OCR of its own source frames without hand-written references.
+This session designs that metric and the study that uses it to compare adaptive sampling against
+fixed 0.5 fps and to tune `scene_threshold` / `max_gap_secs`. Approval gates are in force.
+
+Phase 1 intent, from the user: facts = whatever charts state (the assistant owns the taxonomy);
+both precision and recall matter, hallucinations are the more dangerous; ~1 hour of human review,
+assisted; ≤ 3 GPU-hours for the sweep; fixed 0.5 fps is the fair quality comparison because that
+is what many earlier outputs were generated at; objective = quality per GPU-hour.
+
+### Research summary
+
+**Factual-error typology (proven, peer-reviewed).** CHOCOLATE (Huang et al., ACL 2024 Findings,
+arXiv:2312.10160) defines seven chart-caption error types — Value, Label, Trend, Magnitude,
+Out-of-context, Nonsense, Grammatical — annotated per sentence by seven annotators (Fleiss
+κ = 0.63, majority agreement 91%); even GPT-4V is non-factual in ~38% of sentences. Their metric
+(CHARTVE) is a trained visual-entailment model; ours grounds three of the seven types (Value,
+Label, Out-of-context) in OCR and explicitly does not claim the other four.
+
+**OCR engine (proven, measured on this corpus).** Tesseract's own documentation requires dark
+text on a light background for 4.x+ and 20–30 px capital letters; Ubuntu 22.04 ships 4.1.1
+(no adaptive thresholding, added in 5.0). Chart axis text at 1080p is ~10–12 px on a dark
+background. Production precedent for screenshot text is deep-learning OCR: OmniParser (Microsoft)
+uses EasyOCR by default and PaddleOCR optionally, no tesseract (`requirements.txt`, `util/utils.py`).
+Measured on six kept frames from job `b73bdbf8` with ground truth read from price-axis crops of
+four of them (76 legible values):
+
+| engine / variant | axis values recovered | obviously wrong tokens | s/frame |
+|---|---|---|---|
+| tesseract 4.1.1 raw, `--psm 11` | ≈ 0 (garbage: "ATMA CTL") | — | 0.3 |
+| tesseract 4.1.1 inverted + 3x upscale, `--psm 11` | 42 / 76 (55%) | `7508` `8508` `908` for 750B/850B/910B, `1413.67`, `0405.21`, `02.514T` | 0.9 |
+| **RapidOCR (PP-OCRv6 det/rec small, ONNX Runtime, CPU), raw frame** | **76 / 76 (100%)** | none well-formed-wrong; two mangled (`-0000000`, `0001687`) | 1.3 |
+| RapidOCR, 2x upscale | 76 / 76 | same | 1.5 |
+
+RapidOCR on the raw frame is the engine. Installed on the desktop in `~/.venvs/ocr` (user-space,
+no root); tesseract was installed via apt for the comparison and can be removed.
+
+**Calibration statistics (convention).** ~150 human judgments at n = 150 give a Wilson interval
+of roughly ±5 pp on a precision near 0.9; agreement reported as Cohen's κ. F-beta with β = 0.5
+(van Rijsbergen) weights precision double.
+
+### Decisions
+
+1. **OCR engine: RapidOCR on raw 1080p frames.** Measured 100% recall of legible axis values vs
+   55% with digit-substitution errors for the best tesseract configuration. **Status: proven.**
+2. **Fact units and matching.** Facts are numbers (normalised: `1.66T`, `$42,000`, `42k`,
+   `-0.25%` → value + unit + sign), tickers/asset labels, timeframe labels, dates, indicator names —
+   CHOCOLATE's Value, Label and Out-of-context classes. A stated fact matches if its normalised
+   value appears in the reference OCR within a documented tolerance (exact for labels; numeric
+   tolerance to be set during calibration). Trend and Magnitude errors are out of the metric's
+   reach and are sampled by the human review instead. **Status:** typology proven; rules internal,
+   calibrated against human labels before any number is trusted.
+3. **Two references.** Precision is scored against OCR of the frames the model **saw**; recall
+   against OCR of **every 2 fps candidate frame** in the segment's window — what was on screen —
+   with "prominent" = persisted ≥ N s and above a text-height floor. Scoring recall against sampled
+   frames would reward samplers that see less. User-approved. **Status: internal.**
+4. **Calibration protocol.** ~150 items, disagreement-first (description vs OCR conflict, low OCR
+   confidence), plus a random slice; report κ and the matching-rule fixes; nothing ships without
+   the κ. Assisted review sheet: frames + description + extracted facts side by side.
+   **Status: convention.**
+5. **Placement.** Server-side per-job diagnostic (`fidelity` block beside `capture`), kept-frame
+   thumbnails stored with results (~40 KB each), review sheet as a client command, sweep harness
+   with the corpus tooling outside the repo. RapidOCR becomes an external dependency checked by
+   `doctor`, like ffmpeg. **Status: internal.**
+6. **Objective.** Rank settings by **F0.5 per GPU-hour** with a **hard precision floor equal to
+   the fixed-0.5 baseline's precision** on the same videos (no setting may hallucinate more than
+   what would otherwise have shipped). User-approved. **Status: convention + stated priority.**
+7. **Study design.** Three 1080p videos at the 10th / 50th / 90th percentile of corpus change
+   rate — `2024_2_19` (1.24 triggers/min), `2024_6_24` (2.52), `2025_05_26` (3.93) — minutes 5–20
+   of each. Grid: threshold {0.05, 0.08, 0.12} × floor {15, 30 s} plus fixed 0.5 fps;
+   ≈ 2.4 GPU-hours. Segment-level bootstrap intervals; no winner declared from noise.
+   **Status: internal; budget arithmetic from PR-022 measurements.**
+8. **Storage and accounting.** Thumbnails ≈ 6 MB per 40-minute video; GPU time from `[timing]`
+   lines. **Status: internal.**
+
+**Not decided here:** the numeric tolerance and the prominence thresholds (set in calibration);
+whether Trend/Magnitude errors need their own instrument (deferred until the human review shows
+their rate).

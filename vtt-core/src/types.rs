@@ -64,6 +64,29 @@ pub struct Timeline {
     /// parameters travel with the data. Omitted when absent. (PR-022)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureInfo>,
+    /// Visual fidelity diagnostic summary (PR-023); the per-segment detail is in
+    /// `fidelity.json` beside the results. Omitted when the diagnostic is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fidelity: Option<FidelitySummary>,
+}
+
+/// Corpus-level summary of the visual fidelity diagnostic. (PR-023)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FidelitySummary {
+    /// "kept" or "candidates" -- what recall was scored against.
+    pub reference: String,
+    pub segments: usize,
+    pub stated: usize,
+    pub supported: usize,
+    pub prominent: usize,
+    pub mentioned: usize,
+    pub precision: f64,
+    pub recall: f64,
+    pub f05: f64,
+    /// True when the vision prompt was grounded on this same OCR (PR-024). The
+    /// precision figure is then circular and is NOT evidence of accuracy.
+    #[serde(default)]
+    pub ocr_grounded: bool,
 }
 
 /// Frame-selection mode recorded in `CaptureInfo`.
@@ -300,6 +323,7 @@ mod tests {
                 },
             ],
             capture: None,
+            fidelity: None,
         };
         let json = serde_json::to_string_pretty(&timeline).unwrap();
         let deserialized: Timeline = serde_json::from_str(&json).unwrap();

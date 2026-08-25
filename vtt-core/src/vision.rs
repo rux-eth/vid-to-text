@@ -4,8 +4,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    format_timestamp, parse_timestamp, Chunk, FrameSample, OllamaConfig, Segment, SegmentType,
-    TranscriptWindow, VisionConfig, VttError,
+    format_timestamp, parse_timestamp, Chunk, FrameSample, OcrFrame, OcrGroundingConfig,
+    OllamaConfig, Segment, SegmentType, TranscriptWindow, VisionConfig, VttError,
 };
 
 // --- Ollama API serde types ---
@@ -70,6 +70,8 @@ pub struct OllamaClient {
     /// Adaptive mode balances batch sizes (see `batch_sizes`); fixed mode keeps
     /// the legacy fill-then-remainder split so its output is byte-identical.
     balanced_batches: bool,
+    /// OCR-grounded prompts (PR-024).
+    grounding: OcrGroundingConfig,
 }
 
 impl OllamaClient {
@@ -97,6 +99,7 @@ impl OllamaClient {
             transcript_window: vision_config.transcript_window,
             use_transcript: vision_config.use_transcript,
             balanced_batches: vision_config.adaptive.enabled,
+            grounding: vision_config.ocr_grounding.clone(),
         })
     }
 
@@ -149,6 +152,7 @@ impl OllamaClient {
         &self,
         chunk: &Chunk,
         frames: &[FrameSample],
+        ocr: &[OcrFrame],
         whisper_segments: &[Segment],
         previous_context: Option<&str>,
     ) -> Result<Vec<Segment>, VttError> {
@@ -169,6 +173,23 @@ impl OllamaClient {
                 .iter()
                 .map(|f| format_timestamp(f.timestamp))
                 .collect();
+            // OCR text for exactly these frames, positionally aligned with them
+            // (`run_ocr` preserves input order). Empty when grounding is off.
+            let frame_text: Vec<String> = if self.grounding.enabled && ocr.len() == frames.len() {
+                ocr[frame_offset..frame_offset + batch.len()]
+                    .iter()
+                    .map(|f| {
+                        f.prompt_items(self.grounding.min_score, self.grounding.max_items_per_frame as usize)
+                            .iter()
+                            .map(|it| it.text.trim())
+                            .filter(|t| !t.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             // Build the prompt PER BATCH. Previously this was hoisted outside the
             // loop, so every batch in a chunk shared one prompt containing the
@@ -184,7 +205,7 @@ impl OllamaClient {
                 None
             };
             let ctx = if self.use_transcript { previous_context } else { None };
-            let prompt = build_prompt(&self.prompt_template, windowed.as_deref(), ctx, &frame_times);
+            let prompt = build_prompt(&self.prompt_template, windowed.as_deref(), ctx, &frame_times, &frame_text);
 
             // Retry up to 3 times on empty response
             let mut description = None;
@@ -325,9 +346,26 @@ pub fn check_context_budget(
 ) -> Result<u32, VttError> {
     let per_frame = tokens_per_frame(width, height, ollama.vision_patch_px);
     let images = per_frame.saturating_mul(vision.max_frames_per_request);
-    let total = images.saturating_add(ollama.prompt_reserve_tokens);
+    // OCR-grounded prompts quote up to `max_items_per_frame` items per frame (PR-024).
+    let ocr_tokens = if vision.ocr_grounding.enabled {
+        vision
+            .ocr_grounding
+            .max_items_per_frame
+            .saturating_mul(vision.ocr_grounding.tokens_per_item)
+            .saturating_mul(vision.max_frames_per_request)
+    } else {
+        0
+    };
+    let total = images
+        .saturating_add(ocr_tokens)
+        .saturating_add(ollama.prompt_reserve_tokens);
     if total > ollama.num_ctx {
-        let fit = ollama.num_ctx.saturating_sub(ollama.prompt_reserve_tokens) / per_frame.max(1);
+        let per_frame_all = per_frame.saturating_add(if vision.ocr_grounding.enabled {
+            vision.ocr_grounding.max_items_per_frame.saturating_mul(vision.ocr_grounding.tokens_per_item)
+        } else {
+            0
+        });
+        let fit = ollama.num_ctx.saturating_sub(ollama.prompt_reserve_tokens) / per_frame_all.max(1);
         return Err(VttError::Config(format!(
             "vision request would not fit ollama.num_ctx: {} frames x {} tokens ({}x{} at {} px per \
              token) + {} reserved = {} > {}. Lower vision.max_frames_per_request to {} or raise \
@@ -430,21 +468,46 @@ fn build_prompt(
     transcript: Option<&str>,
     previous_context: Option<&str>,
     frame_times: &[String],
+    frame_text: &[String],
 ) -> String {
     let mut prompt = template.to_string();
 
-    // Per-frame capture times. Qwen3-VL's own processor interleaves
-    // "<X.X seconds>" text before each frame's vision tokens; Ollama renders all
-    // images before the message text, so ordered labels are the faithful
-    // equivalent and were verified to be used correctly. (PR-022)
+    // Per-frame capture times, and (PR-024) the text OCR read from each frame.
+    // Qwen3-VL's own processor interleaves "<X.X seconds>" before each frame's
+    // vision tokens; Ollama renders all images before the message text, so
+    // ordered labels are the faithful equivalent and were verified to be used
+    // correctly. (PR-022)
+    let grounded = frame_text.len() == frame_times.len() && !frame_text.is_empty();
     if !frame_times.is_empty() {
-        prompt.push_str(&format!(
-            "\n\nThis request contains {} frame(s) in chronological order. Capture time of each \
-             frame (HH:MM:SS.mmm):\n",
-            frame_times.len()
-        ));
-        for (i, t) in frame_times.iter().enumerate() {
-            prompt.push_str(&format!("Frame {}: {}\n", i + 1, t));
+        if grounded {
+            prompt.push_str(&format!(
+                "\n\nThis request contains {} frame(s) in chronological order, with the time each \
+                 was captured (HH:MM:SS.mmm) and the text an OCR engine detected in it:\n",
+                frame_times.len()
+            ));
+            for (i, (t, text)) in frame_times.iter().zip(frame_text).enumerate() {
+                if text.is_empty() {
+                    prompt.push_str(&format!("Frame {} ({}): (no text detected)\n", i + 1, t));
+                } else {
+                    prompt.push_str(&format!("Frame {} ({}): {}\n", i + 1, t, text));
+                }
+            }
+            prompt.push_str(
+                "The OCR text is a reading aid, NOT ground truth: it misses stylised text and can \
+                 misread digits. The images are authoritative. Use the OCR to check numbers and \
+                 labels you are already reading from the image -- prefer it when a value is too \
+                 small to read confidently -- but do not report anything you cannot see in the \
+                 image itself, and do not simply list the detected text. ",
+            );
+        } else {
+            prompt.push_str(&format!(
+                "\n\nThis request contains {} frame(s) in chronological order. Capture time of each \
+                 frame (HH:MM:SS.mmm):\n",
+                frame_times.len()
+            ));
+            for (i, t) in frame_times.iter().enumerate() {
+                prompt.push_str(&format!("Frame {}: {}\n", i + 1, t));
+            }
         }
         prompt.push_str(
             "Frames may be unevenly spaced; use these times when describing when something \
@@ -653,10 +716,10 @@ mod tests {
     /// instruction is why 98% of visual segments cite the transcript.
     #[test]
     fn test_build_prompt_without_transcript_omits_instruction() {
-        let p = build_prompt("TEMPLATE", None, None, &[]);
+        let p = build_prompt("TEMPLATE", None, None, &[], &[]);
         assert!(!p.contains("Audio transcript"));
         assert!(!p.contains("relates to what is being said"));
-        let p2 = build_prompt("TEMPLATE", Some("hello"), None, &[]);
+        let p2 = build_prompt("TEMPLATE", Some("hello"), None, &[], &[]);
         assert!(p2.contains("hello"));
     }
 
@@ -668,8 +731,8 @@ mod tests {
         let segs = sample();
         let b0 = transcript_for_window(&segs, 0.0, 10.0, TranscriptWindow::Concurrent);
         let b3 = transcript_for_window(&segs, 30.0, 40.0, TranscriptWindow::Concurrent);
-        let p0 = build_prompt("T", b0.as_deref(), None, &[]);
-        let p3 = build_prompt("T", b3.as_deref(), None, &[]);
+        let p0 = build_prompt("T", b0.as_deref(), None, &[], &[]);
+        let p3 = build_prompt("T", b3.as_deref(), None, &[], &[]);
         assert_ne!(p0, p3, "batches must get different transcript windows");
     }
 
@@ -843,13 +906,13 @@ mod tests {
 
     #[test]
     fn test_build_prompt_without_transcript() {
-        let result = build_prompt("Describe the scene.", None, None, &[]);
+        let result = build_prompt("Describe the scene.", None, None, &[], &[]);
         assert_eq!(result, "Describe the scene.");
     }
 
     #[test]
     fn test_build_prompt_with_transcript() {
-        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."), None, &[]);
+        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."), None, &[], &[]);
         assert!(result.contains("Describe the scene."));
         assert!(result.contains("Hello, welcome to the show."));
         assert!(result.contains("Audio transcript"));
@@ -857,13 +920,13 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_empty_transcript() {
-        let result = build_prompt("Describe the scene.", Some("   "), None, &[]);
+        let result = build_prompt("Describe the scene.", Some("   "), None, &[], &[]);
         assert_eq!(result, "Describe the scene.");
     }
 
     #[test]
     fn test_build_prompt_with_previous_context() {
-        let result = build_prompt("Describe.", Some("Hello."), Some("A man waved goodbye."), &[]);
+        let result = build_prompt("Describe.", Some("Hello."), Some("A man waved goodbye."), &[], &[]);
         assert!(result.contains("Describe."));
         assert!(result.contains("A man waved goodbye."));
         assert!(result.contains("Hello."));
@@ -872,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_context_no_transcript() {
-        let result = build_prompt("Describe.", None, Some("A man waved goodbye."), &[]);
+        let result = build_prompt("Describe.", None, Some("A man waved goodbye."), &[], &[]);
         assert!(result.contains("A man waved goodbye."));
         assert!(!result.contains("Audio transcript"));
     }
@@ -909,7 +972,7 @@ mod tests {
         };
 
         let frames = vec![FrameSample { path: frame_path, timestamp: 0.0, scene_score: 0.0 }];
-        let segments = client.describe_chunk(&chunk, &frames, &[], None).await.unwrap();
+        let segments = client.describe_chunk(&chunk, &frames, &[], &[], None).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());
@@ -949,10 +1012,10 @@ mod tests {
     #[test]
     fn test_build_prompt_lists_frame_times_in_order() {
         let times = vec!["00:00:00.000".to_string(), "00:00:12.500".to_string()];
-        let p = build_prompt("T", None, None, &times);
+        let p = build_prompt("T", None, None, &times, &[]);
         assert!(p.contains("2 frame(s)"));
         assert!(p.find("Frame 1: 00:00:00.000").unwrap() < p.find("Frame 2: 00:00:12.500").unwrap());
-        assert!(!build_prompt("T", None, None, &[]).contains("Frame 1"));
+        assert!(!build_prompt("T", None, None, &[], &[]).contains("Frame 1"));
     }
 
     #[test]
@@ -997,5 +1060,32 @@ mod tests {
             let v = batch_sizes(n, 15, true);
             assert!(v.iter().all(|&s| s <= 15) && v.iter().sum::<usize>() == n, "n={n}: {v:?}");
         }
+    }
+    #[test]
+    fn test_build_prompt_grounded_lists_text_and_subordinates_ocr_to_image() {
+        let times = vec!["00:00:00.000".to_string(), "00:00:12.500".to_string()];
+        let text = vec!["BITSTAMP | O71708 | H71958".to_string(), String::new()];
+        let p = build_prompt("T", None, None, &times, &text);
+        assert!(p.contains("Frame 1 (00:00:00.000): BITSTAMP | O71708 | H71958"));
+        assert!(p.contains("Frame 2 (00:00:12.500): (no text detected)"));
+        assert!(p.contains("NOT ground truth") && p.contains("images are authoritative"));
+        assert!(p.contains("do not report anything you cannot see in the image"));
+        // ungrounded keeps the PR-022 wording exactly
+        let plain = build_prompt("T", None, None, &times, &[]);
+        assert!(plain.contains("Frame 1: 00:00:00.000") && !plain.contains("OCR"));
+    }
+
+    #[test]
+    fn test_context_budget_accounts_for_ocr_tokens() {
+        let ollama = OllamaConfig::default();
+        let mut vision = VisionConfig::default(); // 15 frames
+        let plain = check_context_budget(&ollama, &vision, 1920, 1080).unwrap();
+        vision.ocr_grounding.enabled = true; // 60 items x 12 tokens x 15 frames
+        let grounded = check_context_budget(&ollama, &vision, 1920, 1080).unwrap();
+        assert_eq!(grounded - plain, 60 * 12 * 15);
+        // grounding shrinks how many frames fit, and the message says so
+        vision.max_frames_per_request = 30;
+        let msg = check_context_budget(&ollama, &vision, 1920, 1080).unwrap_err().to_string();
+        assert!(msg.contains("Lower vision.max_frames_per_request to 22"), "{msg}");
     }
 }

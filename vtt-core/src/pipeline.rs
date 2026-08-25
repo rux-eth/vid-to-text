@@ -6,8 +6,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     check_context_budget, clear_checkpoints, load_checkpoints, parse_timestamp, prepare_chunks,
-    save_checkpoint, transcribe_chunk, CaptureInfo, OllamaClient, SamplingMode, Segment,
-    SegmentType, ServerConfig, Timeline, TranscriptWindow, VttError, WhisperModel,
+    run_ocr, save_checkpoint, score_segments, transcribe_chunk, write_thumbnails, CaptureInfo,
+    FidelityReport, OcrFrame, OllamaClient, SamplingMode, Segment, SegmentType, ServerConfig,
+    Timeline, TranscriptWindow, VttError, WhisperModel,
 };
 use crate::whisper::repetition_report;
 
@@ -93,6 +94,19 @@ pub async fn process_video(
         Some(OllamaClient::new(&config.ollama, &config.vision)?)
     };
 
+    // OCR is needed by grounded prompts (PR-024) and/or the fidelity diagnostic
+    // (PR-023). It runs once per chunk, pre-spawned one chunk ahead so it overlaps
+    // GPU work -- the same pattern the pipeline already uses for Whisper -- and the
+    // result serves both consumers.
+    let ocr_needed = config.vision.ocr_grounding.enabled || config.fidelity.enabled;
+    let mut ocr_by_chunk: std::collections::HashMap<u32, Vec<OcrFrame>> =
+        std::collections::HashMap::new();
+    let mut pending_ocr: Option<(u32, tokio::task::JoinHandle<Result<Vec<OcrFrame>, VttError>>)> =
+        None;
+    let frames_of = |a: &crate::ChunkArtifacts| -> Vec<(f64, std::path::PathBuf)> {
+        a.frames.iter().map(|f| (f.timestamp, f.path.clone())).collect()
+    };
+
     let mut all_chunk_segments = Vec::new();
     let mut prev_context: Option<String> = None;
     let mut pending_whisper: Option<
@@ -103,6 +117,34 @@ pub async fn process_video(
         check_cancelled()?;
         let chunk_start = Instant::now();
         let ci = artifact.chunk.index;
+
+        if ocr_needed {
+            let t = Instant::now();
+            let this = match pending_ocr.take() {
+                Some((idx, handle)) if idx == ci => handle
+                    .await
+                    .map_err(|e| VttError::Config(format!("ocr task panicked: {e}")))??,
+                other => {
+                    if let Some((_, h)) = other {
+                        h.abort();
+                    }
+                    run_ocr(&config.ocr, &frames_of(artifact)).await?
+                }
+            };
+            let items: usize = this.iter().map(|f| f.items.len()).sum();
+            eprintln!(
+                "[ocr] chunk_{ci}: {} frame(s), {items} text region(s) ({:.1}s)",
+                this.len(),
+                t.elapsed().as_secs_f64()
+            );
+            ocr_by_chunk.insert(ci, this);
+            if let Some(next) = manifest.chunks.get(i + 1) {
+                let cfg = config.ocr.clone();
+                let nf = frames_of(next);
+                let nidx = next.chunk.index;
+                pending_ocr = Some((nidx, tokio::spawn(async move { run_ocr(&cfg, &nf).await })));
+            }
+        }
 
         let chunk_segments = if let Some(segments) = cached.get(&artifact.chunk.index) {
             eprintln!("[timing] chunk_{ci}: loaded from checkpoint");
@@ -164,6 +206,7 @@ pub async fn process_video(
                 .describe_chunk(
                     &artifact.chunk,
                     &artifact.frames,
+                    ocr_by_chunk.get(&ci).map(|v| v.as_slice()).unwrap_or(&[]),
                     &whisper_segments,
                     prev_context.as_deref(),
                 )
@@ -228,6 +271,52 @@ pub async fn process_video(
         }
     }
 
+    // Visual fidelity diagnostic (PR-023): OCR the kept frames, check each visual
+    // segment's stated facts against them, keep thumbnails beside the results so
+    // the check stays reproducible after the job dir is cleaned. Diagnoses only;
+    // a failure here is logged and never fails the job.
+    if config.fidelity.enabled {
+        let t = Instant::now();
+        // Run in its own task: a panic in the diagnostic becomes a JoinError here
+        // instead of killing the job after the GPU work is done (found in PR-023
+        // validation, where a tokenizer panic stranded a finished job).
+        let mut kept: Vec<(f64, std::path::PathBuf)> = Vec::new();
+        let mut ocr: Vec<OcrFrame> = Vec::new();
+        for c in &manifest.chunks {
+            match ocr_by_chunk.get(&c.chunk.index) {
+                Some(done) => ocr.extend(done.iter().cloned()),
+                // Only reachable if a chunk was never visited (all-cached job).
+                None => kept.extend(frames_of(c)),
+            }
+        }
+        let (cfg, job, segs) = (config.clone(), job_id.to_string(), timeline.segments.clone());
+        let joined =
+            tokio::spawn(async move { run_fidelity(&cfg, kept, ocr, &job, &segs).await }).await;
+        let outcome = match joined {
+            Ok(r) => r,
+            Err(e) => Err(VttError::Config(format!("diagnostic task panicked: {e}"))),
+        };
+        match outcome {
+            Ok(report) => {
+                let s = &report.summary;
+                eprintln!(
+                    "[fidelity] {} visual segments: precision {:.3} ({}/{} stated facts on screen), \
+                     recall {:.3} ({}/{} prominent on-screen facts mentioned), F0.5 {:.3}, reference={}{} ({:.1}s)",
+                    s.segments, s.precision, s.supported, s.stated, s.recall, s.mentioned, s.prominent, s.f05,
+                    s.reference,
+                    if s.ocr_grounded {
+                        " -- NOT INDEPENDENT: the prompt was grounded on this same OCR"
+                    } else {
+                        ""
+                    },
+                    t.elapsed().as_secs_f64()
+                );
+                timeline.fidelity = Some(report.summary.clone());
+            }
+            Err(e) => eprintln!("[fidelity] diagnostic failed (job output unaffected): {e}"),
+        }
+    }
+
     // Clean up checkpoints after successful merge
     if config.processing.cleanup_checkpoints {
         let _ = clear_checkpoints(&config.processing.temp_dir, job_id).await;
@@ -258,7 +347,47 @@ pub fn merge_segments(
         duration_seconds,
         segments,
         capture: None,
+        fidelity: None,
     }
+}
+
+/// Run the fidelity diagnostic for a finished job: thumbnails, OCR of every kept
+/// frame, scoring, and `fidelity.json` in the job's results dir.
+async fn run_fidelity(
+    config: &ServerConfig,
+    missing: Vec<(f64, std::path::PathBuf)>,
+    mut ocr: Vec<OcrFrame>,
+    job_id: &str,
+    segments: &[Segment],
+) -> Result<FidelityReport, VttError> {
+    let results_dir = Path::new(&config.processing.results_dir).join(job_id);
+    let all: Vec<(f64, std::path::PathBuf)> = ocr
+        .iter()
+        .map(|f| (f.timestamp, std::path::PathBuf::from(&f.path)))
+        .chain(missing.iter().cloned())
+        .collect();
+    write_thumbnails(
+        &config.ffmpeg.path,
+        &all,
+        &results_dir.join("frames"),
+        config.fidelity.thumbnail_width,
+        config.fidelity.thumbnail_quality,
+    )
+    .await?;
+    // Chunks loaded from checkpoint were never visited in the loop, so they have
+    // no OCR yet; everything else is reused rather than re-run.
+    if !missing.is_empty() {
+        ocr.extend(run_ocr(&config.ocr, &missing).await?);
+        ocr.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    // Persist the kept-frame OCR facts so the report can be re-scored offline
+    // (different tolerance, or a candidates reference) without re-running OCR.
+    tokio::fs::write(results_dir.join("ocr.json"), serde_json::to_string(&ocr)?).await?;
+    let mut report = score_segments(segments, &ocr, None, &config.fidelity);
+    report.summary.ocr_grounded = config.vision.ocr_grounding.enabled;
+    let json = serde_json::to_string_pretty(&report)?;
+    tokio::fs::write(results_dir.join("fidelity.json"), json).await?;
+    Ok(report)
 }
 
 /// Capture provenance recorded on every timeline (PR-022): the parameters that

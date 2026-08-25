@@ -22,6 +22,7 @@ cargo run -p vtt-server -- --help   # Server help
 External runtime dependencies (not in Cargo.toml; `doctor` checks for these):
 - `ffmpeg` / `ffprobe` on PATH
 - `yt-dlp` on PATH (for `--url` inputs)
+- RapidOCR (`pip install rapidocr onnxruntime` in a venv) reachable via `fidelity.ocr_command`, only when the fidelity diagnostic is enabled
 - Ollama running on the server host with the configured vision model pulled
 
 ## CLI Usage
@@ -41,6 +42,12 @@ vid-to-text format video.json
 
 # Check system health
 vid-to-text doctor
+
+# Render a fidelity review sheet for a job's results directory (server side)
+vid-to-text review ~/.vid-to-text/server/results/<job-id>
+
+# Re-score a job's fidelity offline (candidates reference / other tolerance)
+vid-to-text rescore ~/.vid-to-text/server/results/<job-id> --candidates cand.jsonl
 ```
 
 ## Architecture
@@ -123,6 +130,9 @@ ssh-desktop 'cd ~/vid-to-text && cargo run --release -p vtt-server'
   `min_trigger_interval_secs`, `max_frames_per_chunk` — see `docs/ARCHITECTURE.md` § Frame Sampling
 - `ollama.prompt_reserve_tokens` — context reserved for prompt text in the per-request token pre-flight
 - `whisper.repetition_window_secs` — window over which the post-hoc repetition report is scored
+- `[ocr]` — OCR engine shared by the fidelity diagnostic and OCR grounding (`command`, `workers`, `threads`)
+- `[vision.ocr_grounding]` — give the vision model each frame's detected text (`enabled`, `max_items_per_frame`, `min_score`, `tokens_per_item`) — see `docs/ARCHITECTURE.md` § Frame Sampling
+- `[fidelity]` — post-run visual fidelity diagnostic (`enabled`, `recall_reference`, `number_tolerance`, `min_persist_secs`, `min_text_height_px`, `label_stoplist`, thumbnails) — see `docs/ARCHITECTURE.md` § Fidelity Diagnostic
 - `ffmpeg.chunk_duration_secs` — chunk size (default 180)
 
 **Client** (`~/.vid-to-text/config/client.toml`):

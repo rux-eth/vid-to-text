@@ -7,6 +7,7 @@ mod vision;
 mod pipeline;
 mod checkpoint;
 mod ytdlp;
+mod fidelity;
 
 pub use types::*;
 pub use error::*;
@@ -17,3 +18,4 @@ pub use vision::*;
 pub use pipeline::*;
 pub use checkpoint::*;
 pub use ytdlp::*;
+pub use fidelity::*;

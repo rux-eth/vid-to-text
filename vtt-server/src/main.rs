@@ -14,8 +14,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use vtt_core::{
-    check_ffmpeg, check_ytdlp, download_video, load_config, load_profile, process_video,
-    JobStatus, OllamaClient, ServerConfig, Timeline,
+    check_ffmpeg, check_ocr, check_ytdlp, download_video, load_config, load_profile, process_video,
+    JobStatus, OllamaClient, ServerConfig, Timeline, VttError,
 };
 
 // --- Request/Response types ---
@@ -250,7 +250,23 @@ fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf
         }
 
         let job_id_str = job_id.to_string();
-        match process_video(&config, &video_path, &job_id_str, force, Some(&source_name), Some(cancel_token)).await {
+        // Run the pipeline in an inner task so a panic anywhere in it surfaces as
+        // a JoinError and the job is marked failed, instead of the task dying
+        // with the job stuck at "processing" and its permit never released
+        // (found in PR-023 validation).
+        let run = {
+            let (config, video_path, job_id_str, source_name, cancel_token) =
+                (config.clone(), video_path.clone(), job_id_str.clone(), source_name.clone(), cancel_token.clone());
+            tokio::spawn(async move {
+                process_video(&config, &video_path, &job_id_str, force, Some(&source_name), Some(cancel_token)).await
+            })
+            .await
+        };
+        let result = match run {
+            Ok(r) => r,
+            Err(e) => Err(VttError::Server(format!("processing task panicked: {e}"))),
+        };
+        match result {
             Ok(timeline) => {
                 {
                     let mut jobs = state.jobs.lock().unwrap();
@@ -306,9 +322,21 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         Err(e) => json!({ "error": e.to_string() }),
     };
 
+    // OCR is required by the fidelity diagnostic (PR-023) and by grounded vision
+    // prompts (PR-024); it is not needed otherwise.
+    let ocr_status = if state.config.fidelity.enabled || state.config.vision.ocr_grounding.enabled {
+        match check_ocr(&state.config.ocr).await {
+            Ok(version) => json!({ "version": version }),
+            Err(e) => json!({ "error": e.to_string() }),
+        }
+    } else {
+        json!("disabled")
+    };
+
     let overall = if ffmpeg_status.get("error").is_none()
         && ollama_status == json!("ok")
         && ytdlp_status.get("error").is_none()
+        && ocr_status.get("error").is_none()
     {
         "ok"
     } else {
@@ -320,6 +348,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "ffmpeg": ffmpeg_status,
         "ollama": ollama_status,
         "ytdlp": ytdlp_status,
+        "ocr": ocr_status,
     }))
 }
 

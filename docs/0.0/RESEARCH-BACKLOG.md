@@ -56,6 +56,8 @@ Closing these gaps is **not** in PR-019's scope ("one PR, one thing"). It is a c
 | PR | Design research | State assessed | Implementation cleared |
 |----|-----------------|----------------|------------------------|
 | [PR-019](../../prs/PR-019-vibe-rails-sync.md) | `design-research ✓` (template is the project's own methodology SSOT) | `state-assessed 2026-08-24` | `implementation-cleared 2026-08-24` |
+| [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | `design-research ✓` (session 2026-08-25: CHOCOLATE typology; OCR engine measured on corpus) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
+| [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | `design-research ✓` (Tier A 2026-08-25: OCR-augmented VQA, both directions) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
 
 ## Tier 2 — Research-Pending
 
@@ -107,6 +109,13 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
 - **Hybrid-vs-uniform description quality on static screen content** cannot be measured with any
   metric found (PR-020 Phase 5.5 Finding 1; Tier C harness `wf_bef168b0-50b` caveats). Open until a
   reference-based evaluation exists.
+
+- **Vision output can degenerate into a numeric counting sequence** ("1.801, 1.802, … 1.877", 568
+  tokens in one clip900 segment on 2026-08-25) that `truncate_repetition` — which keys on repeated
+  *sentences* — does not catch, and `repetition_report` skips visual segments on the assumption
+  that it does. Exposed by the PR-023 fidelity diagnostic (554 unsupported facts in one segment).
+  Candidate fix: score visual segments with the window compression ratio too, or bound numeric
+  runs in `truncate_repetition`. Not in PR-023's scope (diagnoses only).
 
 ## How to update this document
 

@@ -14,6 +14,19 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
 - The vision prompt lists each frame's capture time. (PR-022)
 - Pre-flight check that `max_frames_per_request` fits `ollama.num_ctx` at the source resolution,
   failing before GPU time is spent. (PR-022)
+- Visual fidelity diagnostic (`[fidelity]`): each visual segment's stated numbers, tickers and
+  timeframes are checked against OCR of its own source frames; summary in the timeline's `fidelity`
+  block, detail in `fidelity.json`, kept-frame thumbnails stored with results. Off by default. (PR-023)
+- `vid-to-text review` renders a self-contained review sheet for a job and scores a labels file
+  (Cohen's κ, false/missed hallucinations). (PR-023)
+- `doctor` and `/health` report the OCR engine when the diagnostic is enabled. (PR-023)
+- OCR-grounded vision prompts (`[vision.ocr_grounding]`): each frame's detected text is given to the
+  vision model alongside the image, marked as a fallible reading aid with the image authoritative.
+  Off by default. Addresses measured digit misreads of on-screen values. (PR-024)
+
+### Changed
+- OCR engine configuration moved from `[fidelity]` to its own `[ocr]` section, shared by the fidelity
+  diagnostic and OCR grounding; each job now OCRs its frames once, overlapped with GPU work. (PR-024)
 
 ### Changed
 - Visual segment timestamps derive from ffmpeg presentation timestamps in every mode instead of
