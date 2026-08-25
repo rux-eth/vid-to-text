@@ -121,6 +121,17 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   metric found (PR-020 Phase 5.5 Finding 1; Tier C harness `wf_bef168b0-50b` caveats). Open until a
   reference-based evaluation exists.
 
+- **PR-023's sampling study never ran and is owned by no PR.** Its manifest
+  (`/home/rux/vtt-exp/study/runs/manifest.tsv`) holds **2 completed cells of the 21** the study
+  designed (`2024_2_19` x `study-t05-g15` and `x study-t05-g30`), and both job directories have since
+  been deleted. So PR-022's `scene_threshold` / `max_gap_secs` remain "measured but not optimised" —
+  which was PR-023's original motivation — and the F0.5-per-GPU-hour objective it designed was never
+  exercised. PR-023's roadmap status was corrected from `[x]` to `[~]` on 2026-08-25 and the three
+  unmet criteria marked inline. The κ half moved to PR-027; **the study half has no owner.** Note that
+  PR-026's research also found the study's objective needs revisiting before it is re-run: F0.5
+  weights precision double, which is defensible for a sampling comparison but was never examined
+  against the precision floor the study also imposes.
+
 - **Vision output can degenerate into a numeric counting sequence** ("1.801, 1.802, … 1.877", 568
   tokens in one clip900 segment on 2026-08-25) that `truncate_repetition` — which keys on repeated
   *sentences* — does not catch, and `repetition_report` skips visual segments on the assumption

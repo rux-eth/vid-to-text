@@ -68,7 +68,7 @@ Full PR descriptions live in `prs/`. This file is the index.
 | [PR-020](../../prs/PR-020-market-research-capture-config.md) | Lock the market-research capture config | `[x]` | PR-019, PR-018 |
 | [PR-021](../../prs/PR-021-vision-grounded-asr-correction.md) | Vision-grounded ASR correction | `[ ]` | PR-020 |
 | [PR-022](../../prs/PR-022-content-adaptive-frame-sampling.md) | Content-adaptive frame sampling | `[x]` | PR-020 |
-| [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | Visual fidelity metric and sampling tune | `[x]` | PR-022 |
+| [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | Visual fidelity metric and sampling tune | `[~]` | PR-022 |
 | [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | OCR-grounded vision prompt | `[x]` | PR-022, PR-023 |
 | [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | Vision degeneration guard | `[x]` | PR-023 |
 | [PR-027](../../prs/PR-027-vision-measurement-readiness.md) | Vision measurement readiness (provenance, deploy, β, paired scoring, κ, chronology detector) | `[ ]` | PR-022, PR-023, PR-025 |

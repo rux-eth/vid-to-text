@@ -203,20 +203,31 @@ alongside the code, per Documentation Accuracy).
 
 ## Verification criteria
 
-- [ ] Fact extraction normalises the documented forms (`1.66T`, `$42,000`, `42k`, `-0.25%`, dates,
+**Status, corrected 2026-08-25.** The **code** shipped and is covered by tests (12 in `fidelity.rs`,
+3 in `review.rs`), so the seven criteria above it are ticked. **Three were never met** and are marked
+inline: the κ calibration, the sampling study, and the recommendation the study was meant to produce.
+The roadmap carried `[x]` for this PR with none of its criteria ticked, which overstated it; it now
+reads `[~]`. The κ study moved into **PR-027** (surfaced independently by PR-026's research round,
+which found that human-agreement validation is the field's standard precondition for using a metric
+to rank anything). **The sampling study remains open and is owned by no PR** — PR-022's
+`scene_threshold` / `max_gap_secs` are still "measured but not optimised", which was this PR's
+original motivation.
+
+
+- [x] Fact extraction normalises the documented forms (`1.66T`, `$42,000`, `42k`, `-0.25%`, dates,
       tickers, timeframes) and is pinned by tests; unsupported forms are listed
-- [ ] Precision is computed only against the segment's own frames; recall against the configured
+- [x] Precision is computed only against the segment's own frames; recall against the configured
       reference; both pinned on synthetic OCR fixtures
-- [ ] The OCR wrapper returns text/box/score per frame; a missing or failing command fails the
+- [x] The OCR wrapper returns text/box/score per frame; a missing or failing command fails the
       diagnostic (never the job) with an actionable message; `doctor` reports it
-- [ ] Thumbnails are written per kept frame at the configured width and referenced by timestamp
-- [ ] `fidelity` block round-trips and is omitted when disabled; old timelines load
-- [ ] Review sheet renders from a timeline + thumbnails and emits a labels file; κ is computed from it
-- [ ] Calibration done: ~150 human judgments, κ reported, matching rules adjusted and re-tested
-- [ ] Study run within ≤ 3 GPU-hours on the three named clips with per-setting precision, recall,
+- [x] Thumbnails are written per kept frame at the configured width and referenced by timestamp
+- [x] `fidelity` block round-trips and is omitted when disabled; old timelines load
+- [x] Review sheet renders from a timeline + thumbnails and emits a labels file; κ is computed from it
+- [ ] **NOT DONE — moved to PR-027 scope E.** Calibration done: ~150 human judgments, κ reported, matching rules adjusted and re-tested
+- [ ] **NOT DONE — 2 of 21 cells ran and both job dirs were deleted; still open.** Study run within ≤ 3 GPU-hours on the three named clips with per-setting precision, recall,
       F0.5, GPU-hours and bootstrap intervals recorded here
-- [ ] A recommendation (or an explicit non-result) recorded here; profile values unchanged by this PR
-- [ ] `cargo test --workspace` passes
+- [ ] **NOT DONE — follows the study above.** A recommendation (or an explicit non-result) recorded here; profile values unchanged by this PR
+- [x] `cargo test --workspace` passes
 
 ## Research backing
 
