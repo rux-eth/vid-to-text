@@ -85,7 +85,7 @@ The operating point for market-research corpus capture. Every value below is res
 
 | Setting | Value carried | Why not locked |
 |---|---|---|
-| `vision.fps` | pending | No published evidence measures frame sampling on static screencast content. The premise it was previously chosen on was refuted. Decided by empirical measurement (PR-020 Phase 5.5). |
+| `vision.fps` | **unset (sentinel `0.0`)** | Phase 5.5 measured the corpus directly: meaningful content change every 48-72s, so every fps tested oversamples 11-90x, and the rate varies ~3x between videos. The diversity metrics cannot choose a value (raw scores are length-confounded; controlling length introduces a time-coverage confound). Escalated to **PR-022** (content-adaptive sampling). A job using this profile fails validation until a value is set. |
 | `vision.max_frames_per_request` | 15 | Measured effect of raising it was -5.9% wall time, not statistically established. |
 | `whisper.model_path` | `large-v3-turbo` | Measured equal to `large-v3` on repetition and content retention, at 2.3x lower cost. |
 

@@ -65,8 +65,9 @@ Full PR descriptions live in `prs/`. This file is the index.
 | PR | Description | Status | Depends on |
 |----|-------------|--------|------------|
 | [PR-019](../../prs/PR-019-vibe-rails-sync.md) | Sync vibe-rails scaffolding to current template | `[x]` | — |
-| [PR-020](../../prs/PR-020-market-research-capture-config.md) | Lock the market-research capture config | `[~]` | PR-019, PR-018 |
+| [PR-020](../../prs/PR-020-market-research-capture-config.md) | Lock the market-research capture config | `[x]` | PR-019, PR-018 |
 | [PR-021](../../prs/PR-021-vision-grounded-asr-correction.md) | Vision-grounded ASR correction | `[ ]` | PR-020 |
+| [PR-022](../../prs/PR-022-content-adaptive-frame-sampling.md) | Content-adaptive frame sampling | `[ ]` | PR-020 |
 
 **Index note:** PR-009 never existed; PR-011..PR-015 are listed above without PR files;
 PR-016/PR-017 landed in git history but were never indexed. See

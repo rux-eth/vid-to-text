@@ -671,6 +671,124 @@ comment) and **added to Phase 5.5 scope** as a calibration item.
 - Decide `vision.fps` and replace the sentinel.
 
 
+### Phase 5.5: Empirical Validation (2026-08-24)
+
+**Outcome: Confirm on the locked config. ESCALATE on `vision.fps`.**
+
+Four arms were queued on `clip900.mp4` under the locked config (`use_transcript=false`,
+`transcript_window=causal`, `temperature=0`, `beam5`) with fps as the only variable. Three completed
+(0.25, 0.5, 1.0); the fps 2.0 arm was cancelled mid-run once the finding below made it redundant,
+saving ~55 min of GPU.
+
+**Control passed.** The speech track is byte-identical across all three arms (110 segments each),
+confirming fps affects only the visual track, as the locked config assumes.
+
+#### Finding 1 — the researched metrics CANNOT answer the fps question
+
+This is a negative result about the method, and it is the more important half of Phase 5.5.
+
+Raw scores (uncontrolled length) suggest higher fps is worse:
+
+| arm | docs | tokens | CR | NGD4 | SRS4 | SelfBLEU |
+|---|---|---|---|---|---|---|
+| fps 0.25 | 15 | 9,002 | 4.344 | 2.077 | 380.1 | 0.1460 |
+| fps 0.5 | 30 | 15,872 | 4.558 | 1.926 | 619.2 | 0.1360 |
+| fps 1.0 | 60 | 29,835 | 4.877 | 1.750 | 1004.0 | 0.1110 |
+
+But Shaib et al. require length control, and under it **the trend reverses**:
+
+| arm | tokens | CR | NGD4 | SRS4 |
+|---|---|---|---|---|
+| fps 0.25 | 9,002 | 4.344 | 2.077 | 380.1 |
+| fps 0.5 | 8,620 | 4.037 | 2.218 | 377.7 |
+| fps 1.0 | 9,002 | 3.992 | 2.246 | 281.6 |
+
+Checking why exposed a **second confound introduced by the control itself**:
+
+| arm | tokens | docs kept | **time covered** |
+|---|---|---|---|
+| fps 0.25 | 9,002 | 15 | **900s** |
+| fps 0.5 | 8,620 | 17 | **510s** |
+| fps 1.0 | 9,002 | 17 | **255s** |
+
+Truncating to a common token budget holds length constant but makes each arm describe a **different
+span of video**. So neither row is valid: raw is length-confounded, controlled is
+time-coverage-confounded, and **both cannot be held constant simultaneously** because fps changes
+tokens-per-second-of-video by construction.
+
+**Conclusion:** these metrics are built to compare *different generators over the same corpus*, not
+*the same generator at different temporal granularities*. They are the right tool for detecting a
+degenerate corpus and the wrong tool for choosing fps. Recorded rather than worked around — picking
+whichever row supported a preferred answer would be exactly the confirmation bias the procedure
+forbids.
+
+#### Finding 2 — direct measurement of content change rate (the useful result)
+
+Prompted by the user's domain observation that charts change rarely, scene-change rate was measured
+directly with ffmpeg on two **full** videos. No GPU, ~2 minutes.
+
+| video | >0.30 | >0.10 | mean gap (>0.10) | median gap (>0.10) |
+|---|---|---|---|---|
+| 2024_2_12 (41 min) | 5 | 33 | 72.1s | 31s |
+| 2024_4_8 (31 min) | 1 | 36 | 48.0s | 11s |
+
+On `clip900`, 97.3% of all detected transitions score below 0.02 — cursor movement and crosshair
+redraw, not content change.
+
+Implied oversampling against a ~45s meaningful-change interval:
+
+| fps | frames per 45s interval |
+|---|---|
+| 2.0 | 90 |
+| 1.0 | 45 |
+| 0.5 | 22 |
+| 0.25 | 11 |
+
+**Every arm tested oversamples by at least an order of magnitude.** The fps sweep was measuring how
+much redundancy the model tolerates, not how much information is captured.
+
+This also retroactively explains the earlier ad-hoc finding that 68% of numbers extracted at fps 2.0
+appeared in exactly one 7.5s segment: at 90 frames per meaningful change, the marginal frames are
+capturing **cursor telemetry**, not chart state.
+
+**Note on Q2:** the "uniform fps oversamples static segments" premise was refuted in Phase 3 as
+motivation rather than measurement. It is now **measured on this corpus** — which is a claim about
+these videos, not a general one, and does not overturn the Phase 3 refutation of the general claim.
+
+#### Finding 3 — change rate is not constant across the corpus
+
+Median gap at the >0.10 threshold is **31s** for one video and **11s** for the other: a ~3x spread on
+n=2. Any single fixed fps is a compromise across that spread, and n=2 cannot characterise 74 videos.
+
+This is the argument for **content-adaptive sampling** rather than a better fixed value.
+
+#### Outcome and escalation
+
+- **Confirm** for every locked dimension. Nothing in Phase 5.5 contradicts the whisper settings,
+  `use_transcript`, `transcript_window`, or the determinism decision.
+- **Escalate** for `vision.fps`. The finding does not select a value on the existing axis; it
+  questions whether fixed-fps is the right mechanism. Per Phase 4's Outcome Branch, that loops to
+  `PROCEDURE-design-planning.md` rather than being resolved here.
+- **`vision.fps` therefore ships UNSET**, behind the validation sentinel, exactly as the Gate Check
+  authorised. **PR-022** is created to design content-adaptive sampling.
+
+#### Deferred to PR-022 (not silently dropped)
+
+- `repetition_report_thold` calibration for per-segment scoring. The three arms produced **zero**
+  repetition flags, so this run supplied no calibration signal — a clean corpus cannot calibrate a
+  detector. Needs deliberately repetitive material or the known-bad transcript set.
+
+#### Tooling caveat found while running this
+
+`cshaib/diversity` v0.1.15 declares **only `typer`** as a dependency but additionally requires
+`nltk`, `numpy`, `rouge_score`, and `evaluate` (which pulls ~30 packages including `datasets` and
+`huggingface-hub`). `pip install diversity` yields a package that cannot be imported. Further, the
+shipped package contains **neither `cr_pos` nor `self_repetition_score`** — two of the four metrics
+the paper recommends. `cr_pos` was caught in Group D; `self_repetition_score` was found only by
+installing it. SRS above is **our implementation of the paper's Eq. 2**, not the authors' code, and is
+labelled accordingly.
+
+
 ## Motivation
 
 The capture config governs what the corpus **is**. Every downstream use inherits it, and

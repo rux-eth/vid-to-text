@@ -1,0 +1,19 @@
+# PR-020 Phase 5.5 measurement arm. NOT a shipping profile.
+# Identical to market-research.toml except vision.fps, which is the variable
+# under test. Delete these once Phase 5.5 lands and fps is decided.
+[vision]
+fps = 0.5
+use_transcript = false
+transcript_window = "causal"
+
+[ollama]
+temperature = 0.0
+
+[whisper]
+beam_size = 5
+initial_prompt = ""
+entropy_thold = 2.4
+logprob_thold = -1.0
+no_speech_thold = 0.6
+temperature_inc = 0.2
+repetition_report_thold = 2.4
