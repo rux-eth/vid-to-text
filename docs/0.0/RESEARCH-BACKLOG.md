@@ -62,7 +62,8 @@ Closing these gaps is **not** in PR-019's scope ("one PR, one thing"). It is a c
 | PR | Design research | Required research topics |
 |----|-----------------|--------------------------|
 | [PR-018](../../prs/PR-018-causal-vision-context.md) | `design-research ✗` | **Non-conforming — see below.** Retrofit to `PR-TEMPLATE.md` and backfill research: (a) look-ahead contamination in LLM-derived corpora, (b) whether audio-conditioned visual descriptions are defensible for exploratory research use, (c) evaluation method for the fix. |
-| PR-020 (not yet drafted) | `design-research ✗` | Lock the market-research capture config: fps / sampling rate, whisper decoding settings, transcript windowing, determinism, and **researched evaluation metrics** for corpus value in exploratory (non-training) use. Includes an empirical validation phase. Depends on PR-019. |
+| [PR-020](../../prs/PR-020-market-research-capture-config.md) | `design-research ✗` -> **`fully-researched 2026-08-24`** | Complete. 8 must-answer questions: 5 resolved at Tier A, 3 escalated to Tier B (Q1 corpus evaluation, Q2 sampling strategy, Q5 repetition detection). Group D verification run. Outcome **Amend**, 5 amendments approved. Phase 5.5 empirical validation still pending. |
+| [PR-021](../../prs/PR-021-vision-grounded-asr-correction.md) | `design-research ~` | Vision-grounded ASR correction — the documented-beneficial direction PR-020 surfaced. Partial basis from PR-020 Q3; needs its own full procedure. Follow-on to PR-020, not a prerequisite. |
 
 ### PR-018 non-conformance (recorded)
 

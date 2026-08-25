@@ -63,6 +63,44 @@ No database. File-based only:
 - **Final output**: JSON file written alongside the input mp4 (default) or at a user-specified path.
 - **Config**: TOML files at `~/.config/vid-to-text/`. Client uses `client.toml`, server uses `server.toml` (separate files since they run on different machines).
 
+## Capture Configuration
+
+The operating point for market-research corpus capture. Every value below is research-backed; see
+`prs/PR-020-market-research-capture-config.md` Research findings for sources and epistemic status.
+
+| Setting | Value | Basis |
+|---|---|---|
+| `whisper.beam_size` | 5 | Whisper paper Sec 4.5 prescribes beam-5 from temperature 0; greedy is documented to fall into repetition loops on long-form audio. |
+| `whisper.initial_prompt` | `""` (off) | Upstream-documented failure mode: the prompt feature "will cause specific hallucinations and repetitions". Its jargon benefit did not materialise on this corpus. |
+| `whisper.entropy_thold` | 2.4 | whisper.cpp default; its analogue of OpenAI's `compression_ratio_threshold`. **Retry trigger, not a filter.** |
+| `whisper.logprob_thold` | -1.0 | whisper.cpp / Whisper paper Sec 4.5 default. |
+| `whisper.no_speech_thold` | 0.6 | whisper.cpp / Whisper paper Sec 4.5 default. |
+| `whisper.temperature_inc` | 0.2 | Temperature ladder 0.0 -> 1.0. Note the paper's own Table 7 shows zero WER gain from fallback. |
+| `vision.use_transcript` | `false` | Audio-to-vision conditioning is the documented-harmful direction: language priors displace visual grounding. |
+| `vision.transcript_window` | `causal` | Enforces the Corpus Look-Ahead Freedom constraint. |
+| `ollama.temperature` | 0.0 | Removes sampling variance. |
+| `ffmpeg.chunk_duration_secs` | 180 | Retained. Its original stated rationale (a "768-frame cap") is unsupported — see `docs/0.0/DESIGN-log.md`. |
+
+**Deliberately not locked**, recorded so the gap is legible rather than implied-settled:
+
+| Setting | Value carried | Why not locked |
+|---|---|---|
+| `vision.fps` | pending | No published evidence measures frame sampling on static screencast content. The premise it was previously chosen on was refuted. Decided by empirical measurement (PR-020 Phase 5.5). |
+| `vision.max_frames_per_request` | 15 | Measured effect of raising it was -5.9% wall time, not statistically established. |
+| `whisper.model_path` | `large-v3-turbo` | Measured equal to `large-v3` on repetition and content retention, at 2.3x lower cost. |
+
+**Reproducibility, stated honestly.** `temperature = 0` removes sampling variance but does **not**
+deliver bit-identical output. Non-determinism at temperature 0 arises from batch-size dependence of
+reduction kernels, and the accepted fix — batch-invariant kernels, ~60% throughput overhead — is not
+implemented by Ollama. A fixed seed does not help, because greedy decoding has no sampling step to
+seed. Runs are repeatable in distribution, not bit-exact.
+
+**Repetition guarding is asymmetric.** `truncate_repetition` (`vtt-core/src/vision.rs`) guards vision
+output only. Whisper output is ungated: its in-decoder thresholds are retry triggers that accept the
+result unconditionally at the final temperature. Post-hoc `compression_ratio` flagging closes this,
+as a diagnostic that flags rather than a filter that edits.
+
+
 ## Testing Strategy
 
 | Level | What | Where |

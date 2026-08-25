@@ -86,6 +86,26 @@ In any multi-phase procedure (`PROCEDURE-pr-research.md`, `PROCEDURE-design-plan
 
 ## Domain Constraints
 
+### Corpus Look-Ahead Freedom
+
+No generated segment may be produced from a prompt containing information that did not exist at that
+segment's own timestamp.
+
+This is a property of the corpus, not of any downstream consumer, and it survives into every later
+use. It is violated by construction when a chunk's full transcript is fed to the vision model, since a
+description covering t=0-7.5s is then generated from speech through t=180s.
+
+**Enforcement:** `vision.transcript_window` must be `causal` (or `use_transcript = false`) for any
+corpus intended for research or trading use. `full` is permitted only for human-readable transcripts
+where the leak is irrelevant and the corpus will not inform a decision about the past.
+
+**Research basis:** look-ahead freedom is formalised as Temporal Non-Interference — a verifiable
+property certifying that a pipeline does not allow future information to influence a decision made in
+the past — and is explicitly scoped to backtesting *and agentic trading pipelines*, not backtests
+alone. "Textual sources that contain hindsight" are a named leakage vector, and such leakage is
+described as something "inspection of the pipeline code cannot rule out."
+See `prs/PR-020-market-research-capture-config.md` Research findings, Q4.
+
 ### No Audio Data on GPU (v1)
 
 Whisper runs on CPU only. The full 24GB of GPU VRAM is reserved for Qwen3-VL. This prevents OOM conditions during parallel processing.

@@ -428,6 +428,7 @@ mod tests {
             fps: 2.0,
             max_tokens: 4096,
             max_frames_per_request: 360,
+            ..Default::default()
         };
         let chunk = Chunk {
             index: 0,
@@ -463,6 +464,7 @@ mod tests {
             fps: 1.0,
             max_tokens: 4096,
             max_frames_per_request: 360,
+            ..Default::default()
         };
         let chunk = Chunk {
             index: 0,
@@ -568,6 +570,7 @@ mod tests {
             fps: 2.0,
             max_tokens: 4096,
             max_frames_per_request: 360,
+            ..Default::default()
         };
         let dir = tempfile::tempdir().unwrap();
         let video_path = dir.path().join("test.mp4");

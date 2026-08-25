@@ -9,6 +9,7 @@ use crate::{
     transcribe_chunk, OllamaClient, Segment, SegmentType, ServerConfig, Timeline, VttError,
     WhisperModel,
 };
+use crate::whisper::repetition_report;
 
 /// Process a video file through the full pipeline:
 /// chunk → Whisper (CPU) → Vision with transcript (GPU) → merge → Timeline.
@@ -102,7 +103,7 @@ pub async fn process_video(
                 .filter(|s| s.segment_type == SegmentType::Visual)
                 .cloned()
                 .collect();
-            prev_context = Some(build_chunk_context(&whisper_segs, &vision_segs));
+            prev_context = Some(build_chunk_context(&whisper_segs, &vision_segs, config.vision.use_transcript));
             segments.clone()
         } else {
             let model = whisper_model.as_ref().unwrap();
@@ -127,8 +128,9 @@ pub async fn process_video(
 
             check_cancelled()?;
 
-            // Step 2: Extract transcript for vision context
-            let transcript = extract_transcript(&whisper_segments);
+            // Vision now receives the segments themselves so it can window the
+            // transcript per batch (PR-018); a pre-flattened string cannot be
+            // windowed and forced every batch to see the whole chunk.
 
             // Step 3: Pre-spawn Whisper for next chunk while Vision runs
             if let Some(next) = manifest.chunks.get(i + 1) {
@@ -148,7 +150,7 @@ pub async fn process_video(
                 .describe_chunk(
                     &artifact.chunk,
                     &artifact.frame_paths,
-                    transcript.as_deref(),
+                    &whisper_segments,
                     config.vision.fps,
                     prev_context.as_deref(),
                 )
@@ -159,7 +161,7 @@ pub async fn process_video(
             check_cancelled()?;
 
             // Build context for next chunk
-            prev_context = Some(build_chunk_context(&whisper_segments, &vision_segments));
+            prev_context = Some(build_chunk_context(&whisper_segments, &vision_segments, config.vision.use_transcript));
 
             // Combine segments from both pipelines
             let mut combined = whisper_segments;
@@ -183,6 +185,29 @@ pub async fn process_video(
 
     let timeline = merge_segments(&source, manifest.duration_seconds, all_chunk_segments);
     eprintln!("[timing] pipeline total: {:.1}s", pipeline_start.elapsed().as_secs_f64());
+
+    // Post-hoc repetition diagnostic over the finished speech track.
+    //
+    // Whisper's in-decoder thresholds are retry triggers that accept unconditionally
+    // at the final temperature, so repetition can reach the output ungated -- and
+    // unlike vision, whisper output has no `truncate_repetition` equivalent. This
+    // FLAGS suspect segments so a long unattended run surfaces them; it never edits
+    // them (Segments Are Immutable After Merge, plus a real false-positive surface).
+    let flags = repetition_report(&timeline.segments, config.whisper.repetition_report_thold);
+    if !flags.is_empty() {
+        eprintln!(
+            "[repetition] {} speech segment(s) exceed compression ratio {:.1} -- possible \
+             hallucinated repetition (NOT filtered; legitimate repetition also scores high):",
+            flags.len(),
+            config.whisper.repetition_report_thold
+        );
+        for f in flags.iter().take(10) {
+            eprintln!("[repetition]   {} -> {}  ratio {:.2}", f.start, f.end, f.ratio);
+        }
+        if flags.len() > 10 {
+            eprintln!("[repetition]   ... and {} more", flags.len() - 10);
+        }
+    }
 
     // Clean up checkpoints after successful merge
     if config.processing.cleanup_checkpoints {
@@ -238,11 +263,13 @@ pub fn extract_transcript(segments: &[Segment]) -> Option<String> {
 pub fn build_chunk_context(
     whisper_segments: &[Segment],
     vision_segments: &[Segment],
+    include_dialogue: bool,
 ) -> String {
     let mut parts = Vec::new();
 
-    // Last few speech segments (roughly last 30s worth)
-    let speech: Vec<&str> = whisper_segments
+    // Last few speech segments (roughly last 30s worth). Skipped when the
+    // visual track is meant to be an independent observation.
+    let speech: Vec<&str> = if !include_dialogue { Vec::new() } else { whisper_segments
         .iter()
         .filter(|s| s.segment_type == SegmentType::Speech && !s.content.trim().is_empty())
         .rev()
@@ -251,7 +278,7 @@ pub fn build_chunk_context(
         .into_iter()
         .rev()
         .map(|s| s.content.as_str())
-        .collect();
+        .collect() };
 
     if !speech.is_empty() {
         parts.push(format!("Recent dialogue: {}", speech.join(" ")));
@@ -260,7 +287,13 @@ pub fn build_chunk_context(
     // Last visual description (truncated)
     if let Some(last_visual) = vision_segments.last() {
         let desc = if last_visual.content.len() > 200 {
-            format!("{}...", &last_visual.content[..200])
+            // `len()` and slicing are both byte-based, so a cap of 200 can land
+            // inside a multi-byte char and panic. Walk back to a char boundary.
+            let mut end = 200;
+            while !last_visual.content.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &last_visual.content[..end])
         } else {
             last_visual.content.clone()
         };
@@ -285,6 +318,65 @@ fn make_segment(segment_type: SegmentType, start_secs: f64, end_secs: f64, conte
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With the visual track meant as an independent observation, the
+    /// cross-chunk context must not smuggle speech back in via "Recent
+    /// dialogue" -- but visual continuity should survive.
+    #[test]
+    fn test_build_chunk_context_can_exclude_dialogue() {
+        let speech = vec![make_segment(SegmentType::Speech, 0.0, 5.0, "spoken words here")];
+        let vision = vec![make_segment(SegmentType::Visual, 0.0, 7.5, "a chart on screen")];
+
+        let with = build_chunk_context(&speech, &vision, true);
+        assert!(with.contains("Recent dialogue"));
+        assert!(with.contains("spoken words here"));
+
+        let without = build_chunk_context(&speech, &vision, false);
+        assert!(!without.contains("Recent dialogue"), "speech must not leak in");
+        assert!(!without.contains("spoken words here"));
+        assert!(without.contains("Last visual"), "visual continuity must survive");
+        assert!(without.contains("a chart on screen"));
+    }
+
+    // --- build_chunk_context UTF-8 regression ---
+
+    /// Regression for a panic seen in production:
+    ///   "byte index 200 is not a char boundary; it is inside '\u{201D}'
+    ///    (bytes 198..201)"
+    /// The chart title `\u{201C}SPDR S&P 500 ETF TRUST - 1W - Arca,\u{201D}` placed a 3-byte
+    /// curly quote across byte 200, and `&content[..200]` sliced into it.
+    #[test]
+    fn test_build_chunk_context_multibyte_at_truncation_boundary() {
+        let mut content = String::new();
+        while content.len() < 198 {
+            content.push('a');
+        }
+        content.push('\u{201D}'); // 3 bytes, occupying 198..201
+        content.push_str(" trailing text so the value exceeds the 200 byte cap");
+
+        assert!(content.len() > 200, "setup: must exceed the truncation cap");
+        assert!(
+            !content.is_char_boundary(200),
+            "setup: byte 200 must land inside a multi-byte char"
+        );
+
+        let vision = vec![make_segment(SegmentType::Visual, 0.0, 7.5, &content)];
+        let speech = vec![make_segment(SegmentType::Speech, 0.0, 5.0, "hello there")];
+
+        let ctx = build_chunk_context(&speech, &vision, true);
+        assert!(ctx.contains("Last visual:"));
+        assert!(ctx.ends_with("..."), "long descriptions should be truncated");
+    }
+
+    /// Truncation must not split a char for any cap position in a dense
+    /// multi-byte string.
+    #[test]
+    fn test_build_chunk_context_all_multibyte_never_panics() {
+        let content: String = std::iter::repeat('\u{4e16}').take(300).collect(); // 3 bytes each
+        let vision = vec![make_segment(SegmentType::Visual, 0.0, 7.5, &content)];
+        let ctx = build_chunk_context(&[], &vision, true);
+        assert!(ctx.contains("Last visual:"));
+    }
 
     // --- merge_segments tests ---
 
@@ -449,7 +541,7 @@ mod tests {
         let vision = vec![
             make_segment(SegmentType::Visual, 0.0, 10.0, "A man stands in a park"),
         ];
-        let ctx = build_chunk_context(&whisper, &vision);
+        let ctx = build_chunk_context(&whisper, &vision, true);
         assert!(ctx.contains("Hello world"));
         assert!(ctx.contains("How are you"));
         assert!(ctx.contains("A man stands in a park"));
@@ -457,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_build_chunk_context_empty() {
-        let ctx = build_chunk_context(&[], &[]);
+        let ctx = build_chunk_context(&[], &[], true);
         assert!(ctx.is_empty());
     }
 
@@ -466,7 +558,7 @@ mod tests {
         let vision = vec![
             make_segment(SegmentType::Visual, 0.0, 10.0, &"x".repeat(500)),
         ];
-        let ctx = build_chunk_context(&[], &vision);
+        let ctx = build_chunk_context(&[], &vision, true);
         assert!(ctx.len() < 300);
         assert!(ctx.contains("..."));
     }

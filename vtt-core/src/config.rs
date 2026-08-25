@@ -164,6 +164,29 @@ pub struct WhisperConfig {
     pub model_size: String,
     pub language: String,
     pub n_threads: u16,
+    /// Beam width. >1 selects beam search; 0 or 1 falls back to greedy.
+    /// Measured on a 900s market-review clip (2026-08-24): beam5 removed all
+    /// repetition, turbo 4.4% -> 0.0% duplicated 8-grams, with no content loss.
+    pub beam_size: u16,
+    /// Vocabulary priming. WARNING: measured harmful on this corpus. A 500-char
+    /// domain prompt produced hallucinated repetition loops (90% of one segment)
+    /// and deleted real content, under both greedy and beam search. It changed
+    /// punctuation and little else. Leave empty unless re-validated for
+    /// repetition rate on real audio.
+    pub initial_prompt: String,
+    /// Initial decoding temperature.
+    pub temperature: f32,
+    /// Fallback step: on a failed quality check the segment is retried at
+    /// temperature + this increment. 0.0 disables fallback entirely.
+    pub temperature_inc: f32,
+    /// Quality gates that trigger the temperature fallback.
+    pub entropy_thold: f32,
+    pub logprob_thold: f32,
+    pub no_speech_thold: f32,
+    /// Post-hoc compression-ratio threshold for flagging repetitive speech segments.
+    /// 2.4 matches OpenAI Whisper's own `compression_ratio_threshold`. Diagnostic
+    /// only -- flagged segments are reported, never edited. (PR-020 Q5)
+    pub repetition_report_thold: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +198,17 @@ pub struct OllamaConfig {
     pub default_prompt: String,
     pub timeout_seconds: u64,
     pub num_ctx: u32,
+    /// Sampling temperature. 0.0 selects greedy decoding, removing *sampling*
+    /// variance between runs.
+    ///
+    /// This does NOT deliver bit-identical output. Non-determinism at temperature 0
+    /// comes from batch-size dependence of reduction kernels, and the accepted fix
+    /// (batch-invariant kernels, ~60% throughput overhead) is not implemented by
+    /// Ollama. Runs are repeatable in distribution, not bit-exact.
+    ///
+    /// A fixed seed is deliberately NOT set: a seed governs the sampling step, and
+    /// greedy decoding has none, so it would be inert. See PR-020 Q7.
+    pub temperature: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,6 +217,33 @@ pub struct VisionConfig {
     pub fps: f32,
     pub max_tokens: u32,
     pub max_frames_per_request: u32,
+    /// How much of the chunk's speech the vision prompt may see.
+    /// `Full` (default) hands every batch the WHOLE chunk transcript, so a
+    /// visual segment at t=0 is generated from words spoken up to t=180 --
+    /// up to `chunk_duration_secs` of look-ahead. Use `Causal` for ML features.
+    pub transcript_window: TranscriptWindow,
+    /// Whether vision sees the transcript at all. `false` makes visual segments
+    /// independent observations of the frames; with it enabled, 98% of them
+    /// cite the audio and are not independent evidence.
+    pub use_transcript: bool,
+}
+
+/// Scope of speech made visible to the vision model for a given batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptWindow {
+    /// Entire chunk. Original behaviour; leaks up to chunk_duration_secs.
+    Full,
+    /// Speech overlapping the batch window. Leak bounded by one segment span.
+    Concurrent,
+    /// Only speech that ended before the batch began. Zero look-ahead.
+    Causal,
+}
+
+impl Default for TranscriptWindow {
+    fn default() -> Self {
+        Self::Full
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -269,6 +330,14 @@ impl Default for WhisperConfig {
             model_size: "large-v3-turbo".to_string(),
             language: "en".to_string(),
             n_threads: 8,
+            beam_size: 5,
+            initial_prompt: String::new(),
+            temperature: 0.0,
+            temperature_inc: 0.2,
+            entropy_thold: 2.4,
+            logprob_thold: -1.0,
+            no_speech_thold: 0.6,
+            repetition_report_thold: 2.4,
         }
     }
 }
@@ -283,6 +352,7 @@ impl Default for OllamaConfig {
                 .to_string(),
             timeout_seconds: 300,
             num_ctx: 65536,
+            temperature: 0.0,
         }
     }
 }
@@ -293,6 +363,8 @@ impl Default for VisionConfig {
             fps: 2.0,
             max_tokens: 4096,
             max_frames_per_request: 15,
+            transcript_window: TranscriptWindow::Full,
+            use_transcript: true,
         }
     }
 }

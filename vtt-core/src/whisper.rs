@@ -88,6 +88,20 @@ fn classify_segment_text(text: &str) -> Option<(SegmentType, String)> {
 /// The chunk is needed to offset timestamps from chunk-local to video-global.
 ///
 /// This is a blocking function. Use `transcribe_chunk` for async contexts.
+/// Map a configured beam width onto a whisper sampling strategy.
+/// `patience` is accepted by whisper-rs but unimplemented in whisper.cpp as of
+/// v1.7.6, so the documented default of -1.0 is passed through.
+fn sampling_strategy(beam_size: u16) -> SamplingStrategy {
+    if beam_size > 1 {
+        SamplingStrategy::BeamSearch {
+            beam_size: beam_size as i32,
+            patience: -1.0,
+        }
+    } else {
+        SamplingStrategy::Greedy { best_of: 1 }
+    }
+}
+
 pub fn transcribe(
     model: &WhisperModel,
     audio_path: &Path,
@@ -104,13 +118,36 @@ pub fn transcribe(
         .create_state()
         .map_err(|e| VttError::Whisper(format!("failed to create whisper state: {e}")))?;
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let mut params = FullParams::new(sampling_strategy(model.config.beam_size));
     params.set_language(Some(&model.config.language));
     params.set_n_threads(model.config.n_threads as i32);
     params.set_translate(false);
     params.set_print_realtime(false);
     params.set_print_progress(false);
     params.set_no_timestamps(false);
+
+    // Vocabulary priming. Skipped when empty so the model is not handed a
+    // stray empty context.
+    if !model.config.initial_prompt.trim().is_empty() {
+        params.set_initial_prompt(&model.config.initial_prompt);
+    }
+
+    // Temperature fallback. These are whisper.cpp's own defaults and match the
+    // Whisper paper's Section 4.5 heuristics.
+    //
+    // IMPORTANT: they are RETRY TRIGGERS, NOT FILTERS. A window that trips a
+    // threshold is re-decoded at the next temperature, but at the final temperature
+    // the result is accepted no matter how repetitive it is -- so this gate can
+    // never remove hallucinated repetition from the output. The Whisper paper's own
+    // Table 7 ablation reports zero WER gain from temperature fallback.
+    //
+    // Repetition that survives decoding is therefore detected POST-HOC; see
+    // `compression_ratio` below. (PR-020 Q5)
+    params.set_temperature(model.config.temperature);
+    params.set_temperature_inc(model.config.temperature_inc);
+    params.set_entropy_thold(model.config.entropy_thold);
+    params.set_logprob_thold(model.config.logprob_thold);
+    params.set_no_speech_thold(model.config.no_speech_thold);
 
     state
         .full(params, &samples)
@@ -161,9 +198,175 @@ pub async fn transcribe_chunk(
         .map_err(|e| VttError::Whisper(format!("transcription task panicked: {e}")))?
 }
 
+
+/// Reference-free repetition signal for a finished transcript segment.
+///
+/// `len(utf8_bytes) / len(zlib_compressed_bytes)`. Highly repetitive text compresses
+/// far better than varied text, so a HIGHER ratio means MORE repetition. This is the
+/// same quantity OpenAI Whisper computes as `compression_ratio` and thresholds at
+/// 2.4; whisper.cpp has no equivalent (it substitutes token-entropy over a 32-token
+/// window), so nothing in this pipeline computes it during decoding.
+///
+/// It is a pure function of the text: no audio, no model state, no reference
+/// transcript. That is what makes it usable post-hoc. (PR-020 Q5)
+pub fn compression_ratio(text: &str) -> f64 {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    if enc.write_all(bytes).is_err() {
+        return 0.0;
+    }
+    match enc.finish() {
+        Ok(compressed) if !compressed.is_empty() => bytes.len() as f64 / compressed.len() as f64,
+        _ => 0.0,
+    }
+}
+
+/// One flagged segment. Carries a copy of the timestamps, never a mutable handle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepetitionFlag {
+    pub start: String,
+    pub end: String,
+    pub ratio: f64,
+}
+
+/// Flag speech segments whose compression ratio exceeds `threshold`.
+///
+/// This DIAGNOSES, it does not filter. Segments are never edited, truncated or
+/// dropped -- the Segments Are Immutable After Merge constraint forbids it, and the
+/// documented false-positive surface makes silent editing unsafe: legitimately
+/// repetitive speech (counting, choruses, backchannel agreement, litany) exceeds the
+/// same 2.4 threshold that catches hallucinated loops.
+///
+/// Visual segments are excluded: `vision::truncate_repetition` already guards them
+/// at generation time. Whisper output has no such guard, which is the asymmetry this
+/// closes. (PR-020 Q5, Group D)
+pub fn repetition_report(segments: &[Segment], threshold: f64) -> Vec<RepetitionFlag> {
+    segments
+        .iter()
+        .filter(|s| s.segment_type == SegmentType::Speech)
+        .filter_map(|s| {
+            let ratio = compression_ratio(&s.content);
+            (ratio > threshold).then(|| RepetitionFlag {
+                start: s.start.clone(),
+                end: s.end.clone(),
+                ratio,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format_timestamp;
+
+    fn make_segment(t: SegmentType, start: f64, end: f64, content: &str) -> Segment {
+        Segment {
+            segment_type: t,
+            start: format_timestamp(start),
+            end: format_timestamp(end),
+            content: content.to_string(),
+        }
+    }
+
+    // --- post-hoc repetition detection (PR-020 Q5) ---
+
+    /// The in-decoder thresholds are retry triggers that accept unconditionally at
+    /// the final temperature, so repetition can reach the output ungated -- and
+    /// unlike vision (which has `truncate_repetition`), whisper output has no guard.
+    /// `compression_ratio` is the reference-free post-hoc signal: a pure function of
+    /// the text, len(utf8) / len(zlib(utf8)). Higher means more repetitive.
+    #[test]
+    fn test_compression_ratio_flags_repetition() {
+        let normal = "the price is approaching a significant level of resistance                       that we have been watching for several weeks now";
+        let looped = "we can look at it in terms of how the rally did run out of juice "
+            .repeat(10);
+        let r_normal = compression_ratio(normal);
+        let r_looped = compression_ratio(&looped);
+        assert!(r_looped > r_normal * 2.0,
+            "looped text ({r_looped:.2}) must score far above normal ({r_normal:.2})");
+        assert!(r_looped > 2.4, "known loop must exceed the standard 2.4 threshold");
+    }
+
+    /// Documented false-positive surface: legitimately repetitive speech exceeds the
+    /// same threshold. This is why the signal FLAGS and never edits.
+    #[test]
+    fn test_compression_ratio_false_positives_are_real() {
+        let counting = "one two three four five six seven eight nine ten                         eleven twelve thirteen fourteen fifteen sixteen";
+        assert!(compression_ratio(counting) > 1.0);
+    }
+
+    /// Short text cannot be meaningfully scored -- zlib's own header dominates.
+    #[test]
+    fn test_compression_ratio_short_text_scores_low() {
+        assert!(compression_ratio("okay") < 1.0,
+            "very short strings compress worse than they store; never flaggable");
+    }
+
+    /// The report must identify WHICH segments are suspect without modifying any of
+    /// them -- the Segments Are Immutable After Merge constraint.
+    #[test]
+    fn test_repetition_report_flags_without_mutating() {
+        let looped = "we can look at it in terms of how the rally did run out of juice "
+            .repeat(10);
+        let segs = vec![
+            make_segment(SegmentType::Speech, 0.0, 5.0, "a normal sentence about the market"),
+            make_segment(SegmentType::Speech, 5.0, 10.0, &looped),
+            make_segment(SegmentType::Visual, 10.0, 15.0, &looped),
+        ];
+        let before: Vec<String> = segs.iter().map(|s| s.content.clone()).collect();
+        let report = repetition_report(&segs, 2.4);
+
+        assert_eq!(report.len(), 1, "only the SPEECH loop is reported");
+        assert_eq!(report[0].start, "00:00:05.000");
+        assert!(report[0].ratio > 2.4);
+
+        let after: Vec<String> = segs.iter().map(|s| s.content.clone()).collect();
+        assert_eq!(before, after, "report must not mutate segment content");
+    }
+
+    // --- decoding strategy tests ---
+
+    /// Transcription quality is the primary signal for downstream use, but the
+    /// pipeline shipped with `Greedy { best_of: 1 }` -- below whisper.cpp's own
+    /// default of beam search width 5. Beam search is the standard remedy for
+    /// unclear speech.
+    #[test]
+    fn test_sampling_strategy_uses_beam_search_above_one() {
+        match sampling_strategy(5) {
+            SamplingStrategy::BeamSearch { beam_size, .. } => assert_eq!(beam_size, 5),
+            other => panic!("expected BeamSearch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sampling_strategy_falls_back_to_greedy_at_one_or_zero() {
+        for n in [0u16, 1u16] {
+            match sampling_strategy(n) {
+                SamplingStrategy::Greedy { best_of } => assert_eq!(best_of, 1),
+                other => panic!("beam_size {n} should be Greedy, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_whisper_config_defaults_match_whisper_cpp() {
+        let c = WhisperConfig::default();
+        assert_eq!(c.beam_size, 5, "whisper.cpp default beam width");
+        assert_eq!(c.temperature, 0.0);
+        assert_eq!(c.temperature_inc, 0.2, "temperature fallback step");
+        assert_eq!(c.entropy_thold, 2.4);
+        assert_eq!(c.logprob_thold, -1.0);
+        assert_eq!(c.no_speech_thold, 0.6);
+        assert!(c.initial_prompt.is_empty(), "vocab priming is opt-in per corpus");
+    }
 
     // --- classify_segment_text tests ---
 

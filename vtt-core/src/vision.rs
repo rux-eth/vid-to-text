@@ -4,7 +4,10 @@ use std::time::Duration;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::{format_timestamp, Chunk, OllamaConfig, Segment, SegmentType, VisionConfig, VttError};
+use crate::{
+    format_timestamp, parse_timestamp, Chunk, OllamaConfig, Segment, SegmentType,
+    TranscriptWindow, VisionConfig, VttError,
+};
 
 // --- Ollama API serde types ---
 
@@ -28,6 +31,7 @@ struct OllamaChatMessage {
 struct OllamaOptions {
     num_predict: u32,
     num_ctx: u32,
+    temperature: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +65,9 @@ pub struct OllamaClient {
     max_tokens: u32,
     max_frames_per_request: u32,
     num_ctx: u32,
+    temperature: f32,
+    transcript_window: TranscriptWindow,
+    use_transcript: bool,
 }
 
 impl OllamaClient {
@@ -84,6 +91,9 @@ impl OllamaClient {
             max_tokens: vision_config.max_tokens,
             max_frames_per_request: vision_config.max_frames_per_request,
             num_ctx: ollama_config.num_ctx,
+            temperature: ollama_config.temperature,
+            transcript_window: vision_config.transcript_window,
+            use_transcript: vision_config.use_transcript,
         })
     }
 
@@ -134,7 +144,7 @@ impl OllamaClient {
         &self,
         chunk: &Chunk,
         frame_paths: &[PathBuf],
-        transcript: Option<&str>,
+        whisper_segments: &[Segment],
         fps: f32,
         previous_context: Option<&str>,
     ) -> Result<Vec<Segment>, VttError> {
@@ -142,7 +152,6 @@ impl OllamaClient {
             return Ok(Vec::new());
         }
 
-        let prompt = build_prompt(&self.prompt_template, transcript, previous_context);
         let encoded = encode_frames_base64(frame_paths).await?;
         let batch_size = self.max_frames_per_request as usize;
         let seconds_per_frame = 1.0 / fps as f64;
@@ -155,6 +164,22 @@ impl OllamaClient {
                 + ((frame_offset + batch.len()) as f64 * seconds_per_frame))
                 .min(chunk.end_seconds);
 
+            // Build the prompt PER BATCH. Previously this was hoisted outside the
+            // loop, so every batch in a chunk shared one prompt containing the
+            // whole chunk's speech -- up to 180s of look-ahead for a 7.5s segment.
+            let windowed = if self.use_transcript {
+                transcript_for_window(
+                    whisper_segments,
+                    batch_start,
+                    batch_end,
+                    self.transcript_window,
+                )
+            } else {
+                None
+            };
+            let ctx = if self.use_transcript { previous_context } else { None };
+            let prompt = build_prompt(&self.prompt_template, windowed.as_deref(), ctx);
+
             // Retry up to 3 times on empty response
             let mut description = None;
             for attempt in 0..3 {
@@ -164,6 +189,7 @@ impl OllamaClient {
                     batch.to_vec(),
                     self.max_tokens,
                     self.num_ctx,
+                    self.temperature,
                 );
 
                 let url = format!("{}/api/chat", self.endpoint);
@@ -272,6 +298,41 @@ fn truncate_repetition(text: &str) -> String {
 }
 
 /// Build the full prompt by combining the template with optional context and transcript.
+/// Select the speech a batch's prompt is allowed to see.
+///
+/// `Full` reproduces the original behaviour (whole chunk, i.e. look-ahead up to
+/// `chunk_duration_secs`). `Concurrent` bounds the leak to one segment span.
+/// `Causal` admits only speech that finished before the batch began, giving a
+/// visual feature that contains no information from its own future.
+pub fn transcript_for_window(
+    segments: &[Segment],
+    batch_start: f64,
+    batch_end: f64,
+    mode: TranscriptWindow,
+) -> Option<String> {
+    let picked: Vec<&str> = segments
+        .iter()
+        .filter(|s| s.segment_type == SegmentType::Speech)
+        .filter(|s| !s.content.trim().is_empty())
+        .filter(|s| {
+            let start = parse_timestamp(&s.start).unwrap_or(0.0);
+            let end = parse_timestamp(&s.end).unwrap_or(start);
+            match mode {
+                TranscriptWindow::Full => true,
+                TranscriptWindow::Causal => end <= batch_start,
+                TranscriptWindow::Concurrent => start < batch_end && end > batch_start,
+            }
+        })
+        .map(|s| s.content.as_str())
+        .collect();
+
+    if picked.is_empty() {
+        None
+    } else {
+        Some(picked.join(" "))
+    }
+}
+
 fn build_prompt(
     template: &str,
     transcript: Option<&str>,
@@ -314,12 +375,14 @@ async fn encode_frames_base64(frame_paths: &[PathBuf]) -> Result<Vec<String>, Vt
 }
 
 /// Construct the Ollama chat request payload.
+#[allow(clippy::too_many_arguments)]
 fn build_chat_request(
     model: &str,
     prompt: &str,
     images: Vec<String>,
     max_tokens: u32,
     num_ctx: u32,
+    temperature: f32,
 ) -> OllamaChatRequest {
     OllamaChatRequest {
         model: model.to_string(),
@@ -332,6 +395,7 @@ fn build_chat_request(
         options: OllamaOptions {
             num_predict: max_tokens,
             num_ctx,
+            temperature,
         },
     }
 }
@@ -416,11 +480,113 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // --- transcript windowing (PR-018) ---
+
+    fn spk(start: f64, end: f64, text: &str) -> Segment {
+        Segment {
+            segment_type: SegmentType::Speech,
+            start: format_timestamp(start),
+            end: format_timestamp(end),
+            content: text.to_string(),
+        }
+    }
+
+    fn sample() -> Vec<Segment> {
+        vec![
+            spk(0.0, 10.0, "alpha"),
+            spk(10.0, 20.0, "bravo"),
+            spk(20.0, 30.0, "charlie"),
+            spk(30.0, 40.0, "delta"),
+        ]
+    }
+
+    /// Causal: only speech that has already finished before the batch starts.
+    /// This is what removes look-ahead entirely.
+    #[test]
+    fn test_transcript_window_causal_excludes_future_speech() {
+        let got = transcript_for_window(&sample(), 20.0, 30.0, TranscriptWindow::Causal)
+            .unwrap();
+        assert!(got.contains("alpha") && got.contains("bravo"));
+        assert!(!got.contains("charlie"), "charlie is concurrent, not past");
+        assert!(!got.contains("delta"), "delta is in the future: LOOK-AHEAD");
+    }
+
+    #[test]
+    fn test_transcript_window_causal_empty_at_start_returns_none() {
+        assert!(transcript_for_window(&sample(), 0.0, 10.0, TranscriptWindow::Causal).is_none());
+    }
+
+    /// Concurrent: bounds leakage to one segment span instead of the whole chunk.
+    #[test]
+    fn test_transcript_window_concurrent_overlaps_only() {
+        let got = transcript_for_window(&sample(), 15.0, 25.0, TranscriptWindow::Concurrent)
+            .unwrap();
+        assert!(got.contains("bravo") && got.contains("charlie"));
+        assert!(!got.contains("delta"), "delta starts after the window ends");
+    }
+
+    /// Full reproduces the old behaviour: the entire chunk, 180s of look-ahead.
+    #[test]
+    fn test_transcript_window_full_returns_everything() {
+        let got = transcript_for_window(&sample(), 0.0, 10.0, TranscriptWindow::Full).unwrap();
+        for w in ["alpha", "bravo", "charlie", "delta"] {
+            assert!(got.contains(w), "Full must include {w}");
+        }
+    }
+
+    /// With the transcript disabled the prompt must contain neither the text nor
+    /// the instruction telling the model to cross-reference audio -- that
+    /// instruction is why 98% of visual segments cite the transcript.
+    #[test]
+    fn test_build_prompt_without_transcript_omits_instruction() {
+        let p = build_prompt("TEMPLATE", None, None);
+        assert!(!p.contains("Audio transcript"));
+        assert!(!p.contains("relates to what is being said"));
+        let p2 = build_prompt("TEMPLATE", Some("hello"), None);
+        assert!(p2.contains("hello"));
+    }
+
+    /// REGRESSION GUARD for the real defect: build_prompt was called ONCE
+    /// outside the batch loop, so every batch in a chunk shared one prompt and
+    /// per-batch windowing was impossible. Different batches must now differ.
+    #[test]
+    fn test_per_batch_prompts_differ_under_windowing() {
+        let segs = sample();
+        let b0 = transcript_for_window(&segs, 0.0, 10.0, TranscriptWindow::Concurrent);
+        let b3 = transcript_for_window(&segs, 30.0, 40.0, TranscriptWindow::Concurrent);
+        let p0 = build_prompt("T", b0.as_deref(), None);
+        let p3 = build_prompt("T", b3.as_deref(), None);
+        assert_ne!(p0, p3, "batches must get different transcript windows");
+    }
+
     // --- build_chat_request tests ---
+
+    /// temperature=0 selects greedy decoding, removing sampling variance. It does
+    /// NOT give bit-identical output (batch-size-dependent reduction kernels), and a
+    /// seed is deliberately absent because greedy decoding has no sampling step to
+    /// seed -- it would be inert. See PR-020 Q7 and Group D.
+    #[test]
+    fn test_build_chat_request_pins_temperature_and_sends_no_seed() {
+        let request = build_chat_request("model", "prompt", vec!["img".into()], 1024, 32768, 0.0);
+        assert_eq!(request.options.temperature, 0.0, "temperature must be pinned");
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"temperature\""), "temperature must reach Ollama");
+        assert!(
+            !json.contains("\"seed\""),
+            "seed must NOT be sent: inert under greedy decoding, and sending it implies \
+             a determinism guarantee the serving stack does not provide"
+        );
+    }
+
+    #[test]
+    fn test_build_chat_request_passes_through_non_default_temperature() {
+        let request = build_chat_request("model", "prompt", vec![], 1024, 32768, 0.7);
+        assert_eq!(request.options.temperature, 0.7);
+    }
 
     #[test]
     fn test_build_chat_request_structure() {
-        let request = build_chat_request("qwen3-vl:8b", "Describe this.", vec!["abc".into(), "def".into()], 4096, 32768);
+        let request = build_chat_request("qwen3-vl:8b", "Describe this.", vec!["abc".into(), "def".into()], 4096, 32768, 0.0);
         assert_eq!(request.model, "qwen3-vl:8b");
         assert!(!request.stream);
         assert_eq!(request.options.num_predict, 4096);
@@ -432,13 +598,13 @@ mod tests {
 
     #[test]
     fn test_build_chat_request_empty_images() {
-        let request = build_chat_request("model", "prompt", vec![], 1024, 32768);
+        let request = build_chat_request("model", "prompt", vec![], 1024, 32768, 0.0);
         assert!(request.messages[0].images.is_empty());
     }
 
     #[test]
     fn test_chat_request_serialization() {
-        let request = build_chat_request("model", "prompt", vec!["img1".into()], 1024, 32768);
+        let request = build_chat_request("model", "prompt", vec!["img1".into()], 1024, 32768, 0.0);
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["model"], "model");
         assert_eq!(json["stream"], false);
@@ -448,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_chat_request_serialization_skips_empty_images() {
-        let request = build_chat_request("model", "prompt", vec![], 1024, 32768);
+        let request = build_chat_request("model", "prompt", vec![], 1024, 32768, 0.0);
         let json = serde_json::to_value(&request).unwrap();
         assert!(json["messages"][0].get("images").is_none());
     }
@@ -626,7 +792,7 @@ mod tests {
             end_seconds: 3.0,
         };
 
-        let segments = client.describe_chunk(&chunk, &[frame_path], None, 2.0, None).await.unwrap();
+        let segments = client.describe_chunk(&chunk, &[frame_path], &[], 2.0, None).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());

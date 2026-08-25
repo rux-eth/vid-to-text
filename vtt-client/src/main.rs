@@ -244,7 +244,12 @@ async fn main() {
                         for e in &entries {
                             let dur_min = e.duration_seconds / 60.0;
                             let title = if e.title.len() > 48 {
-                                format!("{}...", &e.title[..45])
+                                // byte-based cap: back off to a char boundary
+                                let mut end = 45;
+                                while !e.title.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                format!("{}...", &e.title[..end])
                             } else {
                                 e.title.clone()
                             };

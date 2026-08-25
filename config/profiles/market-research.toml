@@ -1,0 +1,65 @@
+# Market-research corpus capture profile.
+#
+# SOURCE OF TRUTH. This file is version-controlled; the copy under
+# ~/.vid-to-text/config/profiles/ on the server is deployed FROM here
+# (see config/deploy-profiles.sh). Do not edit the server copy directly.
+#
+# Every value below is research-backed. Sources and epistemic status:
+#   prs/PR-020-market-research-capture-config.md  -> ## Research findings
+# Operating point summary: docs/ARCHITECTURE.md -> ## Capture Configuration
+
+[vision]
+# fps is DELIBERATELY NOT SET HERE.
+#
+# No published evidence measures frame sampling on static screencast content
+# (PR-020 Q2). The premise it was previously chosen on -- "uniform fps
+# oversamples static segments" -- was refuted 0-2 twice as motivation rather
+# than measurement. At equal frame budget uniform fps beat both adaptive
+# selectors tested. The value is decided by PR-020 Phase 5.5 measurement on
+# this corpus and written here when that lands.
+
+# Visual descriptions as INDEPENDENT observation, not a restatement of audio.
+# Conditioning vision on the transcript is the documented-harmful direction:
+# language priors displace visual grounding (PR-020 Q3). The beneficial
+# direction (vision grounding audio) is unimplemented -- see PR-021.
+use_transcript = false
+
+# Enforces the Corpus Look-Ahead Freedom constraint (docs/CONSTRAINTS.md).
+# With `full`, a description covering t=0-7.5s is generated from speech through
+# t=180s. Look-Ahead-Freedom is a formal pipeline property, and "textual sources
+# that contain hindsight" is a named leakage vector (PR-020 Q4).
+transcript_window = "causal"
+
+[ollama]
+# Greedy decoding. Removes SAMPLING variance only.
+# NOT bit-reproducible: non-determinism at temperature 0 comes from batch-size
+# dependence of reduction kernels, and the fix (batch-invariant kernels, ~60%
+# overhead) is not implemented by Ollama. No seed is set -- greedy decoding has
+# no sampling step, so a seed would be inert. (PR-020 Q7, Group D)
+temperature = 0.0
+
+[whisper]
+# Whisper paper Sec 4.5 prescribes beam-5 from temperature 0. Greedy is
+# documented to fall into repetition loops on long-form audio; the previously
+# shipped Greedy{best_of:1} was below upstream default. (PR-020 Q6)
+beam_size = 5
+
+# DO NOT SET. Upstream-documented failure mode: the prompt feature "will cause
+# specific hallucinations and repetitions". Measured on this corpus: 90% of one
+# segment repeated, real content deleted, while the jargon benefit it is meant
+# to buy did not materialise. (PR-020 Q6, counter-case probe)
+initial_prompt = ""
+
+# whisper.cpp defaults, matching Whisper paper Sec 4.5. Verified 1:1 through
+# whisper-rs to identically-named whisper_full_params fields (PR-020 Group D).
+# These are RETRY TRIGGERS, NOT FILTERS -- the final temperature accepts
+# unconditionally, and the paper's Table 7 shows zero WER gain from fallback.
+entropy_thold = 2.4
+logprob_thold = -1.0
+no_speech_thold = 0.6
+temperature_inc = 0.2
+
+# Post-hoc repetition diagnostic. Flags; never edits. 2.4 matches OpenAI
+# Whisper's own compression_ratio_threshold. Known false positives: counting,
+# choruses, backchannel, litany all exceed it -- which is why it does not filter.
+repetition_report_thold = 2.4

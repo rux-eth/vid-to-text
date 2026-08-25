@@ -60,6 +60,20 @@ Full PR descriptions live in `prs/`. This file is the index.
 
 ---
 
+## Phase: Process & Config Lock (2026-08)
+
+| PR | Description | Status | Depends on |
+|----|-------------|--------|------------|
+| [PR-019](../../prs/PR-019-vibe-rails-sync.md) | Sync vibe-rails scaffolding to current template | `[x]` | — |
+| [PR-020](../../prs/PR-020-market-research-capture-config.md) | Lock the market-research capture config | `[~]` | PR-019, PR-018 |
+| [PR-021](../../prs/PR-021-vision-grounded-asr-correction.md) | Vision-grounded ASR correction | `[ ]` | PR-020 |
+
+**Index note:** PR-009 never existed; PR-011..PR-015 are listed above without PR files;
+PR-016/PR-017 landed in git history but were never indexed. See
+`docs/0.0/RESEARCH-BACKLOG.md` § Index gaps. Reconciling those is a candidate follow-up.
+
+---
+
 ## Notes
 
 - Each PR must satisfy the verification criteria in `docs/CONSTRAINTS.md`

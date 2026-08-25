@@ -20,7 +20,15 @@ Evaluated Video-LLaVA (outdated, 8 frames only), InternVideo2.5 (capable but hea
    **Rationale**: GPU is on a separate machine from the development laptop. Tailscale provides reliable connectivity from anywhere.
 
 2. **Fixed time chunking (configurable, default ~3 min)**: Videos split into time-based chunks for processing.
-   **Rationale**: Derived from Qwen3-VL's 768-frame cap at 2fps. Simple, predictable. Scene-based splitting deferred as enhancement.
+   **Rationale**: Simple, predictable. Scene-based splitting deferred as enhancement.
+
+   > **Corrected 2026-08-24 (PR-020 research, Q8):** the original rationale recorded here was
+   > "Derived from Qwen3-VL's 768-frame cap at 2fps." **No such cap appears in Qwen3-VL's official
+   > documentation.** The model specifies a native 256K context and controls video through a
+   > *visual-token* budget (256-16384 tokens per video, 32x spatial + 2x temporal compression) — a
+   > different quantity that also scales with resolution, not only frame count. The 180s value is
+   > retained because it works and because changing it affects the look-ahead window and cross-chunk
+   > continuity; only its stated justification was wrong.
 
 3. **Ollama for model serving**: Qwen3-VL served via Ollama HTTP API on desktop.
    **Rationale**: Mature tooling, easy model management, clean HTTP interface. Avoids Python subprocess complexity or immature ONNX export.
