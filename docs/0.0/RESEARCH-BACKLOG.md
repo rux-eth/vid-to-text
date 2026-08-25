@@ -94,11 +94,19 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
 
 - **`CLAUDE.md` § Remote server access is stale.** It states "the server is launched manually and foreground when needed — there is no systemd unit, launch script, or persistent log file." As of 2026-08-24 all three exist on the desktop: a `vtt-server.service` systemd unit (`Restart=always`, enabled at boot), `~/vid-to-text/start-vtt-server.sh`, and timestamped logs under `~/.vid-to-text/logs/`. These were installed while deploying an unrelated UTF-8 panic fix. Correcting this section is **out of PR-019's scope** ("one PR, one thing") and needs its own work item — it is a project-doc accuracy fix, not template scaffolding.
 
-- **36 of the 74 corpus videos have cache timelines from 2026-03-30/31 under the pre-PR-020 config**
-  (fps 2.0, transcript-conditioned with full look-ahead, pre-beam-5). They violate the locked
-  constraints, and `~/Documents/seer_archive/bin/stage-videos.sh` treats "has a cache entry" as
-  "done", so a corpus run as tooled would skip them. Found in PR-022's state assessment; outside the
-  repo; needs its own work item before the corpus run.
+- ~~36 of the 74 corpus videos have pre-PR-020 cache timelines that the runner would skip~~ —
+  **RESOLVED 2026-08-25.** The 36 timelines (and 9 matching server-side results) were archived to
+  `~/Documents/seer_archive/pre-pr020-timelines-20260825.tgz` (sha256 recorded alongside; contents
+  verified byte-for-byte before deletion) and removed from both machines. The tooling defect behind
+  it was fixed in `~/Documents/seer_archive/bin/`: `stage-videos.sh` now decides what to transfer
+  from **remote file presence and size** instead of the client cache (it was conflating transfer
+  state with processing state), and `run-corpus.sh` skips a video only when its cached timeline
+  records the **same profile** now being requested, reporting anything stale by name. Its default
+  profile was also `exp-fps05` — an untracked experiment — and is now `market-research`. New helpers
+  `_pending_stage.py`, `_pending_corpus.py`, `_store_result.py`; `meta.json` now records `profile`,
+  `capture` and `fidelity`, and a capture superseded by a different profile is copied to
+  `transcribe-runs/superseded/` rather than overwritten. **Still outside version control** — see
+  [[corpus-tooling-outside-repo]]; bringing `bin/` into the repo remains an open work item.
 - **Server-side results record no capture provenance** (`~/.vid-to-text/server/results/<job>/job.json`
   holds only id/source/status). PR-022 adds provenance to the timeline itself; the server-side record
   remains a gap.
