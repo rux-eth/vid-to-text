@@ -119,12 +119,14 @@ mod tests {
                 start: "00:00:01.000".to_string(),
                 end: "00:00:03.000".to_string(),
                 content: "Hello world".to_string(),
+                frames: Vec::new(),
             },
             Segment {
                 segment_type: SegmentType::Visual,
                 start: "00:00:00.000".to_string(),
                 end: "00:00:05.000".to_string(),
                 content: "A person waves".to_string(),
+                frames: Vec::new(),
             },
         ]
     }
@@ -239,5 +241,17 @@ mod tests {
         // Final file should exist, .tmp should not
         assert!(cp_dir.join("chunk_000.json").exists());
         assert!(!cp_dir.join("chunk_000.json.tmp").exists());
+    }
+    /// PR-022 added `frames` to Segment. A checkpoint written before that must
+    /// still load, or a resumed job would lose every completed chunk.
+    #[test]
+    fn test_legacy_checkpoint_without_frames_loads() {
+        let legacy = r#"{"version":1,"chunk_index":3,"segments":[
+            {"type":"speech","start":"00:09:00.000","end":"00:09:02.000","content":"hi"},
+            {"type":"visual","start":"00:09:00.000","end":"00:09:07.500","content":"a chart"}]}"#;
+        let cp: ChunkCheckpoint = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cp.version, CHECKPOINT_VERSION);
+        assert_eq!(cp.chunk_index, 3);
+        assert!(cp.segments.iter().all(|s| s.frames.is_empty()));
     }
 }

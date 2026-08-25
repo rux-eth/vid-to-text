@@ -9,23 +9,12 @@
 # Operating point summary: docs/ARCHITECTURE.md -> ## Capture Configuration
 
 [vision]
-# DELIBERATELY-UNSET SENTINEL. 0.0 fails config validation with an actionable
-# message, blocking the job BEFORE any GPU time is spent.
-#
-# Omitting the key instead would be worse than useless: an absent TOML key falls
-# through to the code default of 2.0, so a job would silently run a ~106-hour
-# corpus while the operator believed fps was unlocked. Set this explicitly when
-# Phase 5.5 decides it.
-fps = 0.0
-
-# Why it is unset:
-#
-# No published evidence measures frame sampling on static screencast content
-# (PR-020 Q2). The premise it was previously chosen on -- "uniform fps
-# oversamples static segments" -- was refuted 0-2 twice as motivation rather
-# than measurement. At equal frame budget uniform fps beat both adaptive
-# selectors tested. The value is decided by PR-020 Phase 5.5 measurement on
-# this corpus and written here when that lands.
+# Candidate rate. Adaptive sampling evaluates a frame every 0.5 s and keeps
+# roughly one in twelve; 2 fps is also Qwen3-VL's native video fps. Measured on
+# all 74 corpus videos (945 chunks): 88.9% of 2 fps candidates are visually
+# unchanged from the previous candidate, and the trigger rate varies 6.7x between
+# videos, so no fixed rate fits. (PR-022 design session, 2026-08-24)
+fps = 2.0
 
 # Visual descriptions as INDEPENDENT observation, not a restatement of audio.
 # Conditioning vision on the transcript is the documented-harmful direction:
@@ -38,6 +27,30 @@ use_transcript = false
 # t=180s. Look-Ahead-Freedom is a formal pipeline property, and "textual sources
 # that contain hindsight" is a named leakage vector (PR-020 Q4).
 transcript_window = "causal"
+
+[vision.adaptive]
+# Hybrid selection: uniform floor + change-triggered frames + per-chunk cap.
+# Mechanism proven (ffmpeg 4.4.2 behaviour, real PTS); whether it beats uniform
+# at equal budget on static screen content is best-guess-given-constraints --
+# the literature is split and no description-quality metric exists. Fixed mode
+# is `enabled = false`. See docs/ARCHITECTURE.md, Frame Sampling.
+enabled = true
+# ffmpeg `select` scene score vs the previous candidate. Inspected on this
+# corpus: 0.037 = crosshair redraw, 0.076 / 0.126 = chart pan or zoom steps,
+# 0.448 = slide change. The signal sees change ONSETS; settled states are
+# captured by the floor. No literature value exists.
+scene_threshold = 0.08
+# Floor: every persisted screen state is captured within 15 s (12 frames per
+# 180 s chunk). Bounds the settled-state lag the onset-only signal leaves open.
+max_gap_secs = 15.0
+# Refractory: 17% of raw triggers at this threshold fall within 2 s of a kept
+# frame (redraw bursts); de-clustering them costs no coverage.
+min_trigger_interval_secs = 2.0
+# Ceiling = the fps-0.25 arm's density (3 requests per chunk), bounding the
+# corpus's worst case at ~26 h. Never binds on this corpus: 15.4 frames per
+# chunk on average, p95 22, max 29. Measured on clip900 under this profile:
+# 0.35x realtime, i.e. ~16 h for the 45.4 h corpus.
+max_frames_per_chunk = 45
 
 [ollama]
 # Greedy decoding. Removes SAMPLING variance only.
@@ -72,10 +85,13 @@ temperature_inc = 0.2
 # Whisper's own compression_ratio_threshold. Known false positives: counting,
 # choruses, backchannel, litany all exceed it -- which is why it does not filter.
 #
-# KNOWN LIMITATION: 2.4 is calibrated by OpenAI over 30-SECOND DECODE WINDOWS.
-# This pipeline scores each SEGMENT individually; segments are shorter, compress
-# worse, and score lower, so 2.4 is conservative here and under-flags. Measured on
-# one corpus video: 326 clean segments peaked at 1.70, a genuine hallucinated loop
-# scored 8.18 -- the loop is caught, but a moderate one near 2.0 would pass.
-# Deliberately NOT retuned to a single video. Calibration is a Phase 5.5 item.
+# Known false positives at any unit: counting, choruses, backchannel and litany
+# all exceed 2.4 -- which is why this flags and never filters.
 repetition_report_thold = 2.4
+
+# Scored over 30 s windows of consecutive speech, the unit OpenAI calibrated 2.4
+# on. Re-scoring this corpus by window recovered two genuine loops that
+# per-segment scoring missed, one in this profile's own beam-5 transcript of
+# 2024_2_12 ("So let's go to the 4th hour." x15: 0.85 per segment, 4.90 per
+# window). Closes the calibration item PR-020 deferred. (PR-022)
+repetition_window_secs = 30.0

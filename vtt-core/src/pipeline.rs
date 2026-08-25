@@ -5,9 +5,9 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    clear_checkpoints, load_checkpoints, parse_timestamp, prepare_chunks, save_checkpoint,
-    transcribe_chunk, OllamaClient, Segment, SegmentType, ServerConfig, Timeline, VttError,
-    WhisperModel,
+    check_context_budget, clear_checkpoints, load_checkpoints, parse_timestamp, prepare_chunks,
+    save_checkpoint, transcribe_chunk, CaptureInfo, OllamaClient, SamplingMode, Segment,
+    SegmentType, ServerConfig, Timeline, TranscriptWindow, VttError, WhisperModel,
 };
 use crate::whisper::repetition_report;
 
@@ -42,6 +42,20 @@ pub async fn process_video(
     let t = Instant::now();
     let manifest = prepare_chunks(config, video_path, job_id).await?;
     eprintln!("[timing] prepare_chunks: {:.1}s ({} chunks)", t.elapsed().as_secs_f64(), manifest.chunks.len());
+
+    // Pre-flight the per-request token budget at the probed resolution BEFORE any
+    // model is loaded: Ollama truncates an over-long prompt silently. (PR-022)
+    let est = check_context_budget(&config.ollama, &config.vision, manifest.width, manifest.height)?;
+    let total_frames: usize = manifest.chunks.iter().map(|c| c.frames.len()).sum();
+    eprintln!(
+        "[preflight] {}x{} source, {} frames selected ({}), full request ~{} of {} ctx tokens",
+        manifest.width,
+        manifest.height,
+        total_frames,
+        if config.vision.adaptive.enabled { "adaptive" } else { "fixed" },
+        est,
+        config.ollama.num_ctx
+    );
 
     let source = source_name
         .map(|s| s.to_string())
@@ -149,14 +163,13 @@ pub async fn process_video(
             let vision_segments = client
                 .describe_chunk(
                     &artifact.chunk,
-                    &artifact.frame_paths,
+                    &artifact.frames,
                     &whisper_segments,
-                    config.vision.fps,
                     prev_context.as_deref(),
                 )
                 .await?;
-            let n_batches = (artifact.frame_paths.len() + config.vision.max_frames_per_request as usize - 1) / config.vision.max_frames_per_request as usize;
-            eprintln!("[timing] chunk_{ci} vision: {:.1}s ({} frames, {} batches, {} segments)", t.elapsed().as_secs_f64(), artifact.frame_paths.len(), n_batches, vision_segments.len());
+            let n_batches = (artifact.frames.len() + config.vision.max_frames_per_request as usize - 1) / config.vision.max_frames_per_request as usize;
+            eprintln!("[timing] chunk_{ci} vision: {:.1}s ({} frames, {} batches, {} segments)", t.elapsed().as_secs_f64(), artifact.frames.len(), n_batches, vision_segments.len());
 
             check_cancelled()?;
 
@@ -183,7 +196,8 @@ pub async fn process_video(
         all_chunk_segments.push(chunk_segments);
     }
 
-    let timeline = merge_segments(&source, manifest.duration_seconds, all_chunk_segments);
+    let mut timeline = merge_segments(&source, manifest.duration_seconds, all_chunk_segments);
+    timeline.capture = Some(capture_info(config));
     eprintln!("[timing] pipeline total: {:.1}s", pipeline_start.elapsed().as_secs_f64());
 
     // Post-hoc repetition diagnostic over the finished speech track.
@@ -193,16 +207,21 @@ pub async fn process_video(
     // unlike vision, whisper output has no `truncate_repetition` equivalent. This
     // FLAGS suspect segments so a long unattended run surfaces them; it never edits
     // them (Segments Are Immutable After Merge, plus a real false-positive surface).
-    let flags = repetition_report(&timeline.segments, config.whisper.repetition_report_thold);
+    let flags = repetition_report(
+        &timeline.segments,
+        config.whisper.repetition_report_thold,
+        config.whisper.repetition_window_secs,
+    );
     if !flags.is_empty() {
         eprintln!(
-            "[repetition] {} speech segment(s) exceed compression ratio {:.1} -- possible \
+            "[repetition] {} window(s) of {:.0}s exceed compression ratio {:.1} -- possible \
              hallucinated repetition (NOT filtered; legitimate repetition also scores high):",
             flags.len(),
+            config.whisper.repetition_window_secs,
             config.whisper.repetition_report_thold
         );
         for f in flags.iter().take(10) {
-            eprintln!("[repetition]   {} -> {}  ratio {:.2}", f.start, f.end, f.ratio);
+            eprintln!("[repetition]   {} -> {}  ratio {:.2} ({} segments)", f.start, f.end, f.ratio, f.segments);
         }
         if flags.len() > 10 {
             eprintln!("[repetition]   ... and {} more", flags.len() - 10);
@@ -238,6 +257,38 @@ pub fn merge_segments(
         source: source.to_string(),
         duration_seconds,
         segments,
+        capture: None,
+    }
+}
+
+/// Capture provenance recorded on every timeline (PR-022): the parameters that
+/// determined which frames the model saw and how it was prompted.
+pub fn capture_info(config: &ServerConfig) -> CaptureInfo {
+    let a = &config.vision.adaptive;
+    let whisper_model = std::path::Path::new(&config.whisper.model_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| config.whisper.model_path.clone());
+    let transcript_window = match config.vision.transcript_window {
+        TranscriptWindow::Full => "full",
+        TranscriptWindow::Concurrent => "concurrent",
+        TranscriptWindow::Causal => "causal",
+    }
+    .to_string();
+    CaptureInfo {
+        vision_model: config.ollama.model.clone(),
+        whisper_model,
+        chunk_duration_secs: config.ffmpeg.chunk_duration_secs,
+        fps: config.vision.fps,
+        sampling: if a.enabled { SamplingMode::Adaptive } else { SamplingMode::Fixed },
+        scene_threshold: a.enabled.then_some(a.scene_threshold),
+        max_gap_secs: a.enabled.then_some(a.max_gap_secs),
+        min_trigger_interval_secs: a.enabled.then_some(a.min_trigger_interval_secs),
+        max_frames_per_chunk: a.enabled.then_some(a.max_frames_per_chunk),
+        max_frames_per_request: config.vision.max_frames_per_request,
+        use_transcript: config.vision.use_transcript,
+        transcript_window,
+        temperature: config.ollama.temperature,
     }
 }
 
@@ -312,6 +363,7 @@ fn make_segment(segment_type: SegmentType, start_secs: f64, end_secs: f64, conte
         start: format_timestamp(start_secs),
         end: format_timestamp(end_secs),
         content: content.to_string(),
+        frames: Vec::new(),
     }
 }
 
@@ -604,5 +656,29 @@ mod tests {
             .segments
             .iter()
             .any(|s| s.segment_type == SegmentType::Visual));
+    }
+    /// PR-022: provenance must mirror the config that produced the timeline, and
+    /// adaptive parameters must be absent (not zero) in fixed mode.
+    #[test]
+    fn test_capture_info_mirrors_config() {
+        let mut config = ServerConfig::default();
+        config.whisper.model_path = "/home/rux/models/ggml-large-v3-turbo.bin".to_string();
+        let fixed = capture_info(&config);
+        assert_eq!(fixed.sampling, SamplingMode::Fixed);
+        assert!(fixed.scene_threshold.is_none() && fixed.max_frames_per_chunk.is_none());
+        assert_eq!(fixed.whisper_model, "ggml-large-v3-turbo.bin");
+        assert_eq!(fixed.transcript_window, "full");
+        assert_eq!(fixed.fps, 2.0);
+
+        config.vision.adaptive.enabled = true;
+        config.vision.transcript_window = TranscriptWindow::Causal;
+        config.vision.use_transcript = false;
+        let adaptive = capture_info(&config);
+        assert_eq!(adaptive.sampling, SamplingMode::Adaptive);
+        assert_eq!(adaptive.scene_threshold, Some(0.08));
+        assert_eq!(adaptive.max_gap_secs, Some(15.0));
+        assert_eq!(adaptive.max_frames_per_chunk, Some(45));
+        assert_eq!(adaptive.transcript_window, "causal");
+        assert!(!adaptive.use_transcript);
     }
 }

@@ -339,6 +339,7 @@ async fn format_chunked(
             source: timeline.source.clone(),
             duration_seconds: timeline.duration_seconds,
             segments: chunk.iter().map(|s| (*s).clone()).collect(),
+            capture: timeline.capture.clone(),
         };
         let chunk_json = serde_json::to_string(&chunk_timeline)
             .map_err(|e| format!("failed to serialize chunk: {e}"))?;

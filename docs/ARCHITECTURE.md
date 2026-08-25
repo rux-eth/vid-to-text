@@ -45,13 +45,78 @@ vid-to-text is a client/server system that converts mp4 videos into structured J
 
 Per chunk, Whisper runs first (CPU) so the transcript can be passed to Qwen3-VL (GPU) as context. Chunks are processed sequentially in v1. Parallel chunk processing is a future optimization, though it requires care around cross-chunk context continuity.
 
+## Frame Sampling
+
+Frames are extracted per chunk by ffmpeg at the candidate rate `vision.fps`. Two modes share one code
+path; the only difference is the filter chain.
+
+**Fixed mode** (`vision.adaptive.enabled = false`, the default): every candidate frame is kept —
+`-vf fps=N,metadata=print:file=…`. Behaviour is unchanged from earlier versions.
+
+**Adaptive mode** (`vision.adaptive.enabled = true`): a frame is kept when any of these holds —
+
+| rule | expression | parameter |
+|---|---|---|
+| first frame of the chunk | `eq(n,0)` | — |
+| floor: bounded gap since the last kept frame | `gte(t-prev_selected_t, G)` | `max_gap_secs` |
+| trigger: content change, de-clustered | `gt(scene, T) * gte(t-prev_selected_t, R)` | `scene_threshold`, `min_trigger_interval_secs` |
+
+run as `fps=N,select='…',metadata=print:file=…` with `-vsync vfr` (**required**: without it ffmpeg
+duplicates frames to hold a constant rate — 393 files were produced for 9 selected frames on 4.4.2).
+If a chunk still exceeds `max_frames_per_chunk`, the lowest-scoring triggers are dropped; floor frames
+are never dropped, and validation rejects a cap smaller than the floor count. Dropping a trigger that
+sat between two floor frames can widen that one gap to at most 2 x `max_gap_secs`.
+
+`scene` is ffmpeg's `clip(min(mafd, |Δmafd|)/100)` on luma against the *previous candidate frame*
+(FFmpeg 4.4 `f_select.c`). Consequences the design accepts and documents: the signal sees change
+**onsets** (a chart switch, the start of a pan) and not settled states (the end of a pan scores ~0),
+so settled states are captured by the floor within `max_gap_secs`; and small-region changes (a new
+candle, a number tick) score below any usable threshold and are likewise covered by the floor, not by
+triggers. Calibration on the market-research corpus is recorded in
+`prs/PR-022-content-adaptive-frame-sampling.md`; other content should be re-characterised with the
+same sweep before its thresholds are trusted.
+
+**Timestamps are real.** ffmpeg logs `pts_time` (and `lavfi.scene_score`) for every kept frame on
+stderr (`-nostats` keeps progress lines out); the pipeline parses it, requires the frame-file count to
+equal the metadata count, and
+carries `FrameSample { path, timestamp, scene_score }` through to vision. A visual segment spans from
+its first frame's timestamp to the next batch's first timestamp (or the chunk end). For uniformly
+spaced frames this is identical to the previous `frame_offset / fps` arithmetic, which is pinned by a
+test; for adaptive frames it is the only correct answer. These timestamps also bound the transcript
+window (`transcript_for_window`), so they are what enforces Corpus Look-Ahead Freedom when
+`use_transcript = true`.
+
+**The model is told when each frame was captured.** The prompt lists "Frame N: HH:MM:SS.mmm" for the
+batch. Qwen3-VL's own processor interleaves `<X.X seconds>` text before each frame's vision tokens, and
+Ollama renders all images before the message text, so ordered labels are the faithful equivalent.
+
+**Token ceiling per request.** Ollama sends frames at native resolution; measured on the deployed
+stack, a frame costs `⌈w/32⌉·⌈h/32⌉ + 2` tokens (1080p = 2,042, 720p = 882, 360p = 222). Before any
+GPU time is spent, the pipeline probes the source resolution and rejects a job whose
+`max_frames_per_request × tokens_per_frame + ollama.prompt_reserve_tokens` would exceed
+`ollama.num_ctx` — an overflow would otherwise be truncated silently. The per-chunk cap bounds cost
+(worst case = the fps-0.25 arm's density); the per-request cap bounds context.
+
+**Cost model.** A request costs image prefill (~1.07 s per 1080p frame, measured) plus generation,
+and generation dominates once frames are informative: under adaptive sampling each kept frame shows
+something new, so a 15-frame request generates as much text as a 15-frame uniform request that
+showed one unchanged chart. Measured on clip900 under the market-research profile: 87 frames, five
+180 s chunks at 33–84 s of vision each (~2.9 s per frame), **0.35 x realtime end-to-end** — about
+16 h for the 45.4 h corpus, versus ~24 h for the fps-0.25 arm at the same request count. Runtime is
+bounded above by the cap (3 requests per chunk) and below by the floor (1 request per chunk), both
+computable from duration alone; the frame count alone does not predict it.
+
+**Provenance.** `Timeline.capture` records the sampling parameters, models, chunking and transcript
+settings; every visual segment records the timestamps of the frames it was generated from
+(`frames`). Both are omitted when absent, so older timelines and checkpoints load unchanged.
+
 ## Key Abstractions
 
 | Abstraction | Description |
 |-------------|-------------|
 | `Chunk` | A time-bounded segment of a video with start/end timestamps. Unit of processing and checkpointing. |
 | `Segment` | A single output entry: type (`speech`, `visual`, `sound`), start time, end time, content text. |
-| `ChunkArtifacts` | Extracted audio (WAV) and frames (JPEG) for a single chunk, produced by ffmpeg. |
+| `ChunkArtifacts` | Extracted audio (WAV) and `FrameSample`s — JPEG path, real timestamp, scene score — for a single chunk, produced by ffmpeg. |
 | `ChunkManifest` | All artifacts for a job: job directory, video duration, and list of `ChunkArtifacts`. |
 | `Timeline` | The merged, sorted collection of all `Segment`s for a video. Serializes to the final JSON output. |
 
@@ -61,7 +126,7 @@ No database. File-based only:
 
 - **Chunk checkpoints**: Completed chunk results stored as JSON files at `{temp_dir}/{job_id}/checkpoints/chunk_NNN.json`. Atomic writes (tmp + rename) ensure crash safety. Enables resumability.
 - **Final output**: JSON file written alongside the input mp4 (default) or at a user-specified path.
-- **Config**: TOML files at `~/.config/vid-to-text/`. Client uses `client.toml`, server uses `server.toml` (separate files since they run on different machines).
+- **Config**: TOML files at `~/.vid-to-text/config/`. Client uses `client.toml`, server uses `server.toml` (separate files since they run on different machines).
 
 ## Capture Configuration
 
@@ -80,12 +145,18 @@ The operating point for market-research corpus capture. Every value below is res
 | `vision.transcript_window` | `causal` | Enforces the Corpus Look-Ahead Freedom constraint. |
 | `ollama.temperature` | 0.0 | Removes sampling variance. |
 | `ffmpeg.chunk_duration_secs` | 180 | Retained. Its original stated rationale (a "768-frame cap") is unsupported — see `docs/0.0/DESIGN-log.md`. |
+| `vision.fps` | 2.0 (candidate rate) | Adaptive mode evaluates candidates at 2 fps — Qwen3-VL's native video fps — and keeps ~1 in 23. PR-022 design session; the 74-video sweep showed 88.9% of 2 fps candidates are visually unchanged. |
+| `vision.adaptive.enabled` | `true` | See **Frame Sampling**. Mechanism proven; benefit over uniform at equal budget on this content is best-guess-given-constraints (literature split, no scoring metric exists) — fixed mode remains one line away. |
+| `vision.adaptive.scene_threshold` | 0.08 | Corpus-measured: 0.037 = crosshair redraw, 0.076/0.126 = chart pan/zoom steps, 0.448 = slide change. No literature value exists. |
+| `vision.adaptive.max_gap_secs` | 15 | Floor (12 of the ~15 frames a chunk keeps). Bounds the settled-state lag the onset-only signal leaves; precedent for a uniform floor: Gemini 1 fps, Video-MMLU 0.2–1 fps. |
+| `vision.adaptive.min_trigger_interval_secs` | 2 | 17% of raw triggers at T 0.08 fall within 2 s of a kept frame (bursts during redraws); de-clustering removes them at no coverage cost. |
+| `vision.adaptive.max_frames_per_chunk` | 45 | Ceiling = the fps-0.25 arm's density (3 requests per chunk); never binds on this corpus (mean 15.4, p95 22, max 29 per chunk); bounds worst-case corpus cost at ~26 h. |
+| `whisper.repetition_window_secs` | 30 | Repetition is scored over 30 s windows — the unit OpenAI calibrated 2.4 on. Recovered two real loops per-segment scoring missed, one in the locked-config transcript. |
 
 **Deliberately not locked**, recorded so the gap is legible rather than implied-settled:
 
 | Setting | Value carried | Why not locked |
 |---|---|---|
-| `vision.fps` | **unset (sentinel `0.0`)** | Phase 5.5 measured the corpus directly: meaningful content change every 48-72s, so every fps tested oversamples 11-90x, and the rate varies ~3x between videos. The diversity metrics cannot choose a value (raw scores are length-confounded; controlling length introduces a time-coverage confound). Escalated to **PR-022** (content-adaptive sampling). A job using this profile fails validation until a value is set. |
 | `vision.max_frames_per_request` | 15 | Measured effect of raising it was -5.9% wall time, not statistically established. |
 | `whisper.model_path` | `large-v3-turbo` | Measured equal to `large-v3` on repetition and content retention, at 2.3x lower cost. |
 

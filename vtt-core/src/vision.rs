@@ -1,11 +1,10 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    format_timestamp, parse_timestamp, Chunk, OllamaConfig, Segment, SegmentType,
+    format_timestamp, parse_timestamp, Chunk, FrameSample, OllamaConfig, Segment, SegmentType,
     TranscriptWindow, VisionConfig, VttError,
 };
 
@@ -68,6 +67,9 @@ pub struct OllamaClient {
     temperature: f32,
     transcript_window: TranscriptWindow,
     use_transcript: bool,
+    /// Adaptive mode balances batch sizes (see `batch_sizes`); fixed mode keeps
+    /// the legacy fill-then-remainder split so its output is byte-identical.
+    balanced_batches: bool,
 }
 
 impl OllamaClient {
@@ -94,6 +96,7 @@ impl OllamaClient {
             temperature: ollama_config.temperature,
             transcript_window: vision_config.transcript_window,
             use_transcript: vision_config.use_transcript,
+            balanced_batches: vision_config.adaptive.enabled,
         })
     }
 
@@ -139,30 +142,33 @@ impl OllamaClient {
     /// If a transcript is provided, it is included in the prompt so the vision
     /// model can relate visual content to what was said/heard.
     /// If previous_context is provided, it gives the model continuity from the prior chunk.
-    /// Returns one Visual segment per batch of frames for fine-grained temporal resolution.
+    /// Returns one Visual segment per batch of frames. Segment bounds and the
+    /// per-frame time labels in the prompt come from the frames' real timestamps
+    /// (PR-022), never from an assumed spacing.
     pub async fn describe_chunk(
         &self,
         chunk: &Chunk,
-        frame_paths: &[PathBuf],
+        frames: &[FrameSample],
         whisper_segments: &[Segment],
-        fps: f32,
         previous_context: Option<&str>,
     ) -> Result<Vec<Segment>, VttError> {
-        if frame_paths.is_empty() {
+        if frames.is_empty() {
             return Ok(Vec::new());
         }
 
-        let encoded = encode_frames_base64(frame_paths).await?;
-        let batch_size = self.max_frames_per_request as usize;
-        let seconds_per_frame = 1.0 / fps as f64;
+        let encoded = encode_frames_base64(frames).await?;
+        let sizes = batch_sizes(frames.len(), self.max_frames_per_request as usize, self.balanced_batches);
 
         let mut segments = Vec::new();
-        for (batch_idx, batch) in encoded.chunks(batch_size).enumerate() {
-            let frame_offset = batch_idx * batch_size;
-            let batch_start = chunk.start_seconds + (frame_offset as f64 * seconds_per_frame);
-            let batch_end = (chunk.start_seconds
-                + ((frame_offset + batch.len()) as f64 * seconds_per_frame))
-                .min(chunk.end_seconds);
+        let mut frame_offset = 0usize;
+        for (batch_idx, &size) in sizes.iter().enumerate() {
+            let batch = &encoded[frame_offset..frame_offset + size];
+            let (batch_start, batch_end) =
+                batch_bounds(frames, frame_offset, batch.len(), chunk.end_seconds);
+            let frame_times: Vec<String> = frames[frame_offset..frame_offset + batch.len()]
+                .iter()
+                .map(|f| format_timestamp(f.timestamp))
+                .collect();
 
             // Build the prompt PER BATCH. Previously this was hoisted outside the
             // loop, so every batch in a chunk shared one prompt containing the
@@ -178,7 +184,7 @@ impl OllamaClient {
                 None
             };
             let ctx = if self.use_transcript { previous_context } else { None };
-            let prompt = build_prompt(&self.prompt_template, windowed.as_deref(), ctx);
+            let prompt = build_prompt(&self.prompt_template, windowed.as_deref(), ctx, &frame_times);
 
             // Retry up to 3 times on empty response
             let mut description = None;
@@ -246,12 +252,98 @@ impl OllamaClient {
                     start: format_timestamp(batch_start),
                     end: format_timestamp(batch_end),
                     content,
+                    frames: frame_times,
                 });
             }
+            frame_offset += size;
         }
 
         Ok(segments)
     }
+}
+
+/// Split `n` frames into request batches of at most `max` frames.
+///
+/// Legacy (fixed mode): fill each batch to `max` and put the remainder last, so
+/// pre-PR-022 output is reproduced exactly. Balanced (adaptive mode): the same
+/// number of batches, sized as evenly as possible -- 16 kept frames become 8+8
+/// rather than 15+1, so no visual segment is a single frame standing for a few
+/// seconds while its neighbour covers three minutes. (PR-022)
+pub fn batch_sizes(n: usize, max: usize, balanced: bool) -> Vec<usize> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let max = max.max(1);
+    let k = (n + max - 1) / max;
+    if !balanced {
+        let mut v = vec![max; k];
+        let rem = n - max * (k - 1);
+        v[k - 1] = rem;
+        return v;
+    }
+    let base = n / k;
+    let extra = n % k;
+    (0..k).map(|i| base + usize::from(i < extra)).collect()
+}
+
+/// Time span a batch of frames describes: from its first frame's timestamp to the
+/// next batch's first timestamp, or the chunk end for the last batch. (PR-022)
+///
+/// For uniformly spaced frames this equals the previous
+/// `chunk.start + frame_offset / fps` arithmetic exactly; for adaptive frames it
+/// is the only correct answer, because a kept frame stands for the screen state
+/// until the next kept frame.
+pub fn batch_bounds(frames: &[FrameSample], offset: usize, len: usize, chunk_end: f64) -> (f64, f64) {
+    let start = frames[offset].timestamp;
+    let end = frames
+        .get(offset + len)
+        .map(|f| f.timestamp)
+        .unwrap_or(chunk_end)
+        .max(start);
+    (start, end)
+}
+
+/// Visual tokens one frame costs on the served model: one token per
+/// `patch_px x patch_px` cell plus the two vision delimiter tokens. Each axis is
+/// rounded to the nearest whole cell with ties to even, which is Qwen's
+/// `smart_resize` (`round(h / factor) * factor`, Python rounding). Measured on
+/// Ollama 0.18.3 + qwen3-vl:8b-instruct-q8_0: 1080p = 2042 (60 x 34),
+/// 720p = 882 (40 x 22: 22.5 rounds to even), 360p = 222 (20 x 11).
+pub fn tokens_per_frame(width: u32, height: u32, patch_px: u32) -> u32 {
+    let cells = |px: u32| ((px as f64 / patch_px as f64).round_ties_even() as u32).max(1);
+    cells(width) * cells(height) + 2
+}
+
+/// Pre-flight: refuse a job whose full-size request could not fit the context.
+/// Ollama truncates an over-long prompt SILENTLY, so this must fail before any
+/// GPU time is spent. Returns the estimated tokens of a full request.
+pub fn check_context_budget(
+    ollama: &OllamaConfig,
+    vision: &VisionConfig,
+    width: u32,
+    height: u32,
+) -> Result<u32, VttError> {
+    let per_frame = tokens_per_frame(width, height, ollama.vision_patch_px);
+    let images = per_frame.saturating_mul(vision.max_frames_per_request);
+    let total = images.saturating_add(ollama.prompt_reserve_tokens);
+    if total > ollama.num_ctx {
+        let fit = ollama.num_ctx.saturating_sub(ollama.prompt_reserve_tokens) / per_frame.max(1);
+        return Err(VttError::Config(format!(
+            "vision request would not fit ollama.num_ctx: {} frames x {} tokens ({}x{} at {} px per \
+             token) + {} reserved = {} > {}. Lower vision.max_frames_per_request to {} or raise \
+             ollama.num_ctx; Ollama would otherwise truncate the prompt silently.",
+            vision.max_frames_per_request,
+            per_frame,
+            width,
+            height,
+            ollama.vision_patch_px,
+            ollama.prompt_reserve_tokens,
+            total,
+            ollama.num_ctx,
+            fit
+        )));
+    }
+    Ok(total)
 }
 
 /// Load prompt template from file or return the default.
@@ -337,8 +429,28 @@ fn build_prompt(
     template: &str,
     transcript: Option<&str>,
     previous_context: Option<&str>,
+    frame_times: &[String],
 ) -> String {
     let mut prompt = template.to_string();
+
+    // Per-frame capture times. Qwen3-VL's own processor interleaves
+    // "<X.X seconds>" text before each frame's vision tokens; Ollama renders all
+    // images before the message text, so ordered labels are the faithful
+    // equivalent and were verified to be used correctly. (PR-022)
+    if !frame_times.is_empty() {
+        prompt.push_str(&format!(
+            "\n\nThis request contains {} frame(s) in chronological order. Capture time of each \
+             frame (HH:MM:SS.mmm):\n",
+            frame_times.len()
+        ));
+        for (i, t) in frame_times.iter().enumerate() {
+            prompt.push_str(&format!("Frame {}: {}\n", i + 1, t));
+        }
+        prompt.push_str(
+            "Frames may be unevenly spaced; use these times when describing when something \
+             appeared or changed.",
+        );
+    }
 
     if let Some(ctx) = previous_context {
         if !ctx.trim().is_empty() {
@@ -363,9 +475,9 @@ fn build_prompt(
 }
 
 /// Read JPEG/PNG files and encode them as base64 strings.
-async fn encode_frames_base64(frame_paths: &[PathBuf]) -> Result<Vec<String>, VttError> {
-    let mut encoded = Vec::with_capacity(frame_paths.len());
-    for path in frame_paths {
+async fn encode_frames_base64(frames: &[FrameSample]) -> Result<Vec<String>, VttError> {
+    let mut encoded = Vec::with_capacity(frames.len());
+    for path in frames.iter().map(|f| &f.path) {
         let bytes = tokio::fs::read(path)
             .await
             .map_err(|e| VttError::Vision(format!("failed to read frame '{}': {e}", path.display())))?;
@@ -439,6 +551,7 @@ fn strip_thinking_tags(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     // --- Prompt template tests ---
 
@@ -488,6 +601,7 @@ mod tests {
             start: format_timestamp(start),
             end: format_timestamp(end),
             content: text.to_string(),
+            frames: Vec::new(),
         }
     }
 
@@ -539,10 +653,10 @@ mod tests {
     /// instruction is why 98% of visual segments cite the transcript.
     #[test]
     fn test_build_prompt_without_transcript_omits_instruction() {
-        let p = build_prompt("TEMPLATE", None, None);
+        let p = build_prompt("TEMPLATE", None, None, &[]);
         assert!(!p.contains("Audio transcript"));
         assert!(!p.contains("relates to what is being said"));
-        let p2 = build_prompt("TEMPLATE", Some("hello"), None);
+        let p2 = build_prompt("TEMPLATE", Some("hello"), None, &[]);
         assert!(p2.contains("hello"));
     }
 
@@ -554,8 +668,8 @@ mod tests {
         let segs = sample();
         let b0 = transcript_for_window(&segs, 0.0, 10.0, TranscriptWindow::Concurrent);
         let b3 = transcript_for_window(&segs, 30.0, 40.0, TranscriptWindow::Concurrent);
-        let p0 = build_prompt("T", b0.as_deref(), None);
-        let p3 = build_prompt("T", b3.as_deref(), None);
+        let p0 = build_prompt("T", b0.as_deref(), None, &[]);
+        let p3 = build_prompt("T", b3.as_deref(), None, &[]);
         assert_ne!(p0, p3, "batches must get different transcript windows");
     }
 
@@ -693,7 +807,8 @@ mod tests {
         let path = dir.path().join("frame.jpg");
         std::fs::write(&path, b"fake jpeg data").unwrap();
 
-        let result = encode_frames_base64(&[path]).await.unwrap();
+        let frames = [FrameSample { path, timestamp: 0.0, scene_score: 0.0 }];
+        let result = encode_frames_base64(&frames).await.unwrap();
         assert_eq!(result.len(), 1);
 
         let decoded = base64::engine::general_purpose::STANDARD
@@ -704,7 +819,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_encode_frames_base64_missing_file() {
-        let result = encode_frames_base64(&[PathBuf::from("/nonexistent/frame.jpg")]).await;
+        let frames = [FrameSample { path: PathBuf::from("/nonexistent/frame.jpg"), timestamp: 0.0, scene_score: 0.0 }];
+        let result = encode_frames_base64(&frames).await;
         assert!(result.is_err());
     }
 
@@ -727,13 +843,13 @@ mod tests {
 
     #[test]
     fn test_build_prompt_without_transcript() {
-        let result = build_prompt("Describe the scene.", None, None);
+        let result = build_prompt("Describe the scene.", None, None, &[]);
         assert_eq!(result, "Describe the scene.");
     }
 
     #[test]
     fn test_build_prompt_with_transcript() {
-        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."), None);
+        let result = build_prompt("Describe the scene.", Some("Hello, welcome to the show."), None, &[]);
         assert!(result.contains("Describe the scene."));
         assert!(result.contains("Hello, welcome to the show."));
         assert!(result.contains("Audio transcript"));
@@ -741,13 +857,13 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_empty_transcript() {
-        let result = build_prompt("Describe the scene.", Some("   "), None);
+        let result = build_prompt("Describe the scene.", Some("   "), None, &[]);
         assert_eq!(result, "Describe the scene.");
     }
 
     #[test]
     fn test_build_prompt_with_previous_context() {
-        let result = build_prompt("Describe.", Some("Hello."), Some("A man waved goodbye."));
+        let result = build_prompt("Describe.", Some("Hello."), Some("A man waved goodbye."), &[]);
         assert!(result.contains("Describe."));
         assert!(result.contains("A man waved goodbye."));
         assert!(result.contains("Hello."));
@@ -756,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt_with_context_no_transcript() {
-        let result = build_prompt("Describe.", None, Some("A man waved goodbye."));
+        let result = build_prompt("Describe.", None, Some("A man waved goodbye."), &[]);
         assert!(result.contains("A man waved goodbye."));
         assert!(!result.contains("Audio transcript"));
     }
@@ -792,9 +908,94 @@ mod tests {
             end_seconds: 3.0,
         };
 
-        let segments = client.describe_chunk(&chunk, &[frame_path], &[], 2.0, None).await.unwrap();
+        let frames = vec![FrameSample { path: frame_path, timestamp: 0.0, scene_score: 0.0 }];
+        let segments = client.describe_chunk(&chunk, &frames, &[], None).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());
+    }
+    // --- PR-022: real timestamps, prompt time labels, context pre-flight ---
+
+    fn fsample(t: f64) -> FrameSample {
+        FrameSample { path: PathBuf::from(format!("/f/{t}.jpg")), timestamp: t, scene_score: 0.0 }
+    }
+
+    /// Uniform spacing must reproduce the pre-PR-022 arithmetic
+    /// (`chunk.start + frame_offset / fps`) exactly, batch by batch.
+    #[test]
+    fn test_batch_bounds_uniform_matches_previous_arithmetic() {
+        let fps = 2.0_f64;
+        let start = 180.0;
+        let frames: Vec<FrameSample> = (0..360).map(|i| fsample(start + i as f64 / fps)).collect();
+        let batch = 15;
+        for b in 0..24 {
+            let off = b * batch;
+            let (s, e) = batch_bounds(&frames, off, batch, 360.0);
+            let old_s = start + off as f64 / fps;
+            let old_e = (start + (off + batch) as f64 / fps).min(360.0);
+            assert!((s - old_s).abs() < 1e-9 && (e - old_e).abs() < 1e-9, "batch {b}: {s}-{e} vs {old_s}-{old_e}");
+        }
+    }
+
+    #[test]
+    fn test_batch_bounds_non_uniform_uses_real_timestamps() {
+        let frames = vec![fsample(0.0), fsample(12.5), fsample(42.5), fsample(110.0), fsample(140.0)];
+        assert_eq!(batch_bounds(&frames, 0, 2, 180.0), (0.0, 42.5));
+        assert_eq!(batch_bounds(&frames, 2, 2, 180.0), (42.5, 140.0));
+        // last batch runs to the chunk end
+        assert_eq!(batch_bounds(&frames, 4, 1, 180.0), (140.0, 180.0));
+    }
+
+    #[test]
+    fn test_build_prompt_lists_frame_times_in_order() {
+        let times = vec!["00:00:00.000".to_string(), "00:00:12.500".to_string()];
+        let p = build_prompt("T", None, None, &times);
+        assert!(p.contains("2 frame(s)"));
+        assert!(p.find("Frame 1: 00:00:00.000").unwrap() < p.find("Frame 2: 00:00:12.500").unwrap());
+        assert!(!build_prompt("T", None, None, &[]).contains("Frame 1"));
+    }
+
+    #[test]
+    fn test_tokens_per_frame_matches_measured_stack() {
+        assert_eq!(tokens_per_frame(1920, 1080, 32), 2042);
+        assert_eq!(tokens_per_frame(1280, 720, 32), 882);
+        assert_eq!(tokens_per_frame(640, 360, 32), 222);
+    }
+
+    #[test]
+    fn test_check_context_budget_rejects_silent_overflow() {
+        let ollama = OllamaConfig::default(); // num_ctx 65536, reserve 4096, patch 32
+        let mut vision = VisionConfig::default(); // 15 frames
+        assert_eq!(check_context_budget(&ollama, &vision, 1920, 1080).unwrap(), 15 * 2042 + 4096);
+        // 30 x 2042 + 4096 = 65,356 still fits 65,536; 31 does not.
+        vision.max_frames_per_request = 30;
+        assert!(check_context_budget(&ollama, &vision, 1920, 1080).is_ok());
+        vision.max_frames_per_request = 40;
+        let msg = check_context_budget(&ollama, &vision, 1920, 1080).unwrap_err().to_string();
+        assert!(msg.contains("40 frames x 2042") && msg.contains("Lower vision.max_frames_per_request to 30"), "{msg}");
+        // 720p at 40 frames fits (40 x 882 + 4096 = 39,376)
+        assert!(check_context_budget(&ollama, &vision, 1280, 720).is_ok());
+    }
+    #[test]
+    fn test_batch_sizes_legacy_fill_then_remainder() {
+        assert_eq!(batch_sizes(360, 15, false), vec![15; 24]);
+        assert_eq!(batch_sizes(16, 15, false), vec![15, 1]);
+        assert_eq!(batch_sizes(26, 15, false), vec![15, 11]);
+        assert_eq!(batch_sizes(7, 15, false), vec![7]);
+        assert!(batch_sizes(0, 15, false).is_empty());
+    }
+
+    #[test]
+    fn test_batch_sizes_balanced_same_count_even_sizes() {
+        assert_eq!(batch_sizes(360, 15, true), vec![15; 24]);
+        assert_eq!(batch_sizes(16, 15, true), vec![8, 8]);
+        assert_eq!(batch_sizes(19, 15, true), vec![10, 9]);
+        assert_eq!(batch_sizes(31, 15, true), vec![11, 10, 10]);
+        assert_eq!(batch_sizes(7, 15, true), vec![7]);
+        // never exceeds max, always sums to n
+        for n in 1..200 {
+            let v = batch_sizes(n, 15, true);
+            assert!(v.iter().all(|&s| s <= 15) && v.iter().sum::<usize>() == n, "n={n}: {v:?}");
+        }
     }
 }

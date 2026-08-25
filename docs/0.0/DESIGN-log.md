@@ -112,3 +112,172 @@ v1 complete and system-tested. Session focused on post-v1 features, quality impr
 - Updated CLAUDE.md with CLI usage, key config, Q8 model recommendation
 - Updated ARCHITECTURE.md with sequential Whisper→Vision flow
 - Updated ROADMAP.md with Phase 5 post-v1 PRs
+
+## Session: 2026-08-24 — Content-Adaptive Frame Sampling (PR-022)
+
+### Context
+
+PR-020 Phase 5.5 escalated `vision.fps` here: the diversity metrics structurally cannot choose an fps
+(length- and time-coverage-confounded), and direct ffmpeg measurement showed every fixed rate tested
+oversamples static chart content by an order of magnitude while the change rate varies ~3x across
+videos. The premise — is a clock the right trigger at all? — is a design question, so this session ran
+`PROCEDURE-design-planning.md` from Phase 1 with a full state assessment (recorded in
+`prs/PR-022-content-adaptive-frame-sampling.md` § Research findings).
+
+**Approval-gate waiver.** On 2026-08-24 the user explicitly authorised autonomous execution of this PR
+through completion "with your leans, no approval gates by me". Phases 2–5 below therefore ran without
+per-phase user approval. Every decision is labelled with its epistemic status so the waiver does not
+launder a best-guess into a proven result.
+
+### Research summary
+
+Evidence gathered (Tier A inline probes + one Tier C harness, `wf_bef168b0-50b`, 32 agents,
+1.58M tokens — over the ~500k tier target; flagged for the operator).
+
+**Corpus measurement (proven, this corpus).** 74 videos, 45.36 h, 326,663 candidate frames. Scene-score
+sweep at the 2 fps candidate rate over the whole corpus (ffmpeg 4.4.2 `select` `scene`; ~5 s per
+video): 82.6% of candidates score < 0.005 and 88.9% < 0.01 — uniform 2 fps sampling captures a
+visually unchanged frame nine times out of ten. Trigger rate at T > 0.08 is 2.6/min raw corpus-wide
+with a 6.7x per-video spread (0.71–4.77/min); at T > 0.10, 1.6/min. Inter-trigger gaps at T > 0.10
+reach 1,171 s and 2,730 s at T > 0.30. Trigger bursts are real: 17% of raw triggers at T 0.08 fall
+within 2 s of a previous kept frame. Under the chosen rule (T 0.08, G 15 s, R 2 s) the corpus keeps
+15.4 frames per 180 s chunk on average (p50 15, p95 22, max 29; 945 chunks), so a cap of 45 never
+binds.
+
+**What the score bands contain (proven by inspection, clip900).** Before/after frame pairs were
+extracted at representative scores. 0.037 = crosshair/hover redraw (cursor-induced, not content);
+0.076 and 0.126 = chart pan/zoom steps (real view changes); 0.448 = title card → chart. A chart pan
+also appeared at **0.012**: `scene` is `clip(min(mafd, |Δmafd|)/100)` on luma against the *previous
+input frame* (FFmpeg 4.4 `f_select.c`), so sustained motion is suppressed by construction — the
+sampler sees change **onsets**, not settled states. Settled states must come from the floor.
+
+**Alternatives measured and rejected.** `mpdecimate` compares against the last *kept* frame (a better
+signal in principle), but its `frac` is relative to (w/16)(h/16) blocks while positions are sampled at
+stride 4, so the effective area fraction is `frac/16`; even `frac=0.20` kept 1,511/1,800 frames on
+clip900 and the parameter cannot be documented honestly. Rejected.
+
+**ffmpeg 4.4.2 behaviour (proven, empirical + `man ffmpeg-filters`).** Without `-vsync vfr`,
+frame-dropping filters make ffmpeg **duplicate** frames to hold a constant rate: 393 files were written
+for 9 selected frames. `metadata=print` logs `pts_time` and `lavfi.scene_score` per kept frame (to a
+file with `file=`, or to stderr; the implementation uses stderr to avoid filtergraph path escaping);
+`-frame_pts 1` encodes pts in the filename in the `fps` output timebase. `select` exposes
+`prev_selected_t`, which gives a true max-gap floor and a refractory interval in one expression.
+
+**Model/serving facts (proven, measured on the deployed stack).** Ollama 0.18.3 sends frames at native
+resolution: `prompt_eval_count` minus text = **2,042 tokens for 1080p, 882 for 720p, 222 for 360p**
+— exactly Qwen3-VL's 32-px-unit formula with no downscale cap. Fifteen 1080p frames = 30,640 tokens
+of the 65,536 context and ~16 s of prefill; 30 is the most that fit beside a 4,096-token prompt
+reserve, and anything above would be silently truncated. Qwen3-VL's
+own HF processor interleaves `<X.X seconds>` text before each frame's vision tokens
+(`processing_qwen3_vl.py`), Ollama's renderer places all images before the message text
+(`model/renderers/qwen3vl.go`), and a direct test showed the model correctly attributes content to
+per-frame time labels given as "Frame N: t=… s" text. Gemini's production video pipeline is a fixed
+1 fps floor at 258 tokens/frame with MM:SS references (Google AI docs) — precedent for a uniform
+floor, not for adaptive selection.
+
+**Literature (Tier C, conflicting; transferred).** No source measures uniform vs change-triggered vs
+hybrid on static screen content. GUI-World (ICLR 2025): uniform 3.44 vs embedding-based change
+detectors 3.58–3.61 vs a generic frame-difference extractor 3.30 (1–5 scale, no variance). Li & Shi
+2026 (verifier-surfaced, unfetched): uniform 1 fps, pixel-diff and CLIP-adaptive statistically
+indistinguishable. Natural video is split (Brkic: uniform best at 96 frames on 2–3B models; AKS: +3.8
+on LongVideoBench with query-conditioned selection). No validated change threshold exists anywhere;
+the only concrete numbers are one practitioner's unvalidated defaults (mean-abs-diff/255, hot 0.030 /
+cold 0.020 — the same order as our 0.08–0.10 in `scene` units). Lecture benchmarks (Video-MMLU) use
+uniform 32 frames/video and manual 0.2–1 fps floors without ablation. Cost is bounded everywhere by
+fixed frame budgets, never by a frames-per-minute floor. The harness recommended an in-house
+comparison over a Tier D; PR-020 Phase 5.5 already established that no available metric can score
+description quality across sampling regimes, so that comparison is deferred to a future work item
+rather than faked here.
+
+**Repetition-threshold unit (proven, this corpus).** Re-scoring all 33 server results over 30 s
+windows found two genuine hallucination loops that per-segment scoring missed — including one in the
+**locked-config** beam-5 transcript of `2024_2_12` ("So let's go to the 4th hour." x15 at 09:57–10:31:
+per-segment CR max 0.85, window CR 4.90). Window scoring matches the unit OpenAI calibrated 2.4 on.
+
+### Decisions
+
+1. **Hybrid sampling: uniform floor + change-triggered frames, with a per-chunk cap.** Keep a frame
+   when it is the first of the chunk, or ≥ `max_gap_secs` since the last kept frame (floor), or its
+   scene score > `scene_threshold` and ≥ `min_trigger_interval_secs` since the last kept frame
+   (trigger, de-clustered). Then, if a chunk exceeds `max_frames_per_chunk`, drop the lowest-scoring
+   triggers (never floor frames).
+   **Rationale:** the corpus is measured to be ~91% redundant at 2 fps and its change rate varies 4.5x
+   between videos, so no fixed rate fits; the floor guarantees every persisted state is captured
+   within a bounded lag (the literature's only consistent precedent — Gemini, Video-MMLU — is a
+   uniform floor); triggers capture change onsets at their real time; the cap bounds cost. Fixed-fps
+   mode is retained unchanged, so the choice is reversible per profile.
+   **Status:** mechanism **proven** (ffmpeg behaviour, corpus structure); *benefit over uniform at
+   equal budget on this content* is **best-guess-given-constraints** — the literature is split and no
+   scoring metric exists. Recorded honestly; the fixed mode remains one config line away.
+2. **Signal = ffmpeg `select` `scene` score at a 2 fps candidate rate; threshold fixed and absolute.**
+   Per-video derivation was rejected: a percentile threshold equalises trigger *counts* across videos,
+   which hides genuinely busier videos and breaks cross-corpus comparability; an absolute threshold has
+   a physical meaning (mean luma change per pixel) and the floor covers the rest.
+   **Status:** signal semantics **proven** (source); threshold value **measured on this corpus**
+   (bands inspected), not literature-backed — none exists.
+3. **Floor = `max_gap_secs`, default 15 s** (profile and code). Bounds the settled-state lag that the
+   onset-only signal leaves open (a pan's end state is not a trigger). 12 floor frames per 180 s chunk,
+   i.e. most of the ~15 a chunk keeps: on this corpus the floor, not the triggers, carries coverage.
+   **Status:** value **measured** (cost table); the need for a floor is **proven** (signal analysis).
+4. **Ceiling in two units, both enforced.** Per request: the existing `max_frames_per_request` is the
+   token ceiling, and a new pre-flight check `frames x (⌈w/32⌉·⌈h/32⌉ + 2) + prompt reserve ≤ num_ctx`
+   fails the job before GPU time is spent (an overflow past 30 frames at 1080p would otherwise be silent).
+   Per chunk: `max_frames_per_chunk`, default 45 — the fps-0.25 arm's density (3 requests per chunk)
+   — bounding the corpus's worst case at ~26 h. Measured after implementation: cost is
+   generation-dominated once frames are informative, so it tracks *requests*, not frames — clip900
+   ran at 0.35x realtime (~16 h corpus), about two-thirds of the fps-0.25 arm, not the one-third the
+   frame count alone suggested. **Status:** token formula **proven** (measured 2,042/882/222); cap
+   value **measured** (never binds: max 29/chunk on the full corpus); cost **measured** on clip900
+   (0.35x) and on the full 31-minute `2024_4_8` (0.34x realtime, 169 frames, 628.9 s).
+5. **Real frame timestamps replace arithmetic, in both modes.** ffmpeg logs `pts_time` per kept
+   frame via `metadata=print` (stderr, `-nostats`); the file count must equal the metadata count or the chunk fails
+   (a silent mismatch would mislabel every segment). A visual segment spans from its first frame's
+   time to the next batch's first frame (or the chunk end). For uniform frames this reproduces the old
+   arithmetic exactly, pinned by a test. **Status: proven** (empirical, 4.4.2). This also removes the
+   invariant that `transcript_for_window` silently depended on for look-ahead freedom.
+6. **Config surface: `vision.fps` keeps its type and meaning; adaptive parameters live in
+   `[vision.adaptive]`.** `enabled` (default false), `scene_threshold` (0.08), `max_gap_secs` (15),
+   `min_trigger_interval_secs` (2), `max_frames_per_chunk` (45). In adaptive mode `fps` is the
+   candidate rate at which frames are evaluated (2.0, which is also Qwen3-VL's native video fps).
+   The draft's `fps = "auto"` was rejected: it hides three parameters behind one word, needs a
+   tagged type with a custom deserializer, and must survive the profile merge's TOML
+   serialise→merge→deserialise round-trip (`config.rs:552-570`); a plain nested struct does all of
+   that for free and leaves every numeric profile untouched. **Status:** internal; no web round.
+7. **Per-frame capture times go into the prompt as text** ("Frame N: HH:MM:SS.mmm"), in both modes,
+   and `prompts/vision.txt` no longer asserts "regular intervals (typically 2fps)". Matches how the
+   model was trained (`<X.X seconds>` interleaving) and was verified to work through Ollama's
+   images-first rendering. **Status: proven.**
+8. **Capture provenance is recorded in the output.** `Timeline.capture` records the sampling
+   parameters, models and chunking; each visual segment records the timestamps of the frames it was
+   generated from (`frames`). Fixed-fps output was reconstructible from segment spans; adaptive output
+   is data-dependent and would otherwise be irreproducible. Both fields are optional and omitted when
+   empty, so old timelines and checkpoints load unchanged. **Status:** internal; no web round.
+9. **Repetition report scores 30 s windows, not segments.** `whisper.repetition_window_secs` (default
+   30) groups consecutive speech segments; the 2.4 threshold is retained at the unit it was calibrated
+   on; flags name the window and its segment count. Closes PR-020's deferred calibration item without
+   retuning to one video. **Status: proven** (two real loops recovered on this corpus; OpenAI's unit
+   established in PR-020 Group D).
+
+**Explicitly not decided here (recorded as gaps):** whether the hybrid beats uniform at equal budget
+on this content — needs a description-quality metric that does not exist (PR-020 Finding 1);
+downscaling frames to 720p would cut per-frame cost ~57% but its effect on chart-text legibility is
+unmeasured and resolution is not a PR-022 dimension.
+
+### Convergence (Phase 3)
+
+User-waived. The full design above was checked against every open question in the PR draft (six) and
+every verification criterion; all are answered or explicitly deferred with reason. Two ambiguities
+remain and are carried as documented limitations rather than hidden: onset-only detection of pans
+(bounded by the floor) and the untested hybrid-vs-uniform quality question (bounded by the retained
+fixed mode).
+
+### Changes to docs
+- `docs/ARCHITECTURE.md`: new **Frame Sampling** section; Capture Configuration `vision.fps` row
+  replaced by the adaptive operating point; Storage config path corrected.
+- `docs/CONSTRAINTS.md`: new domain constraint **Visual Timestamps Are Frame Timestamps**.
+- `prs/PR-022-content-adaptive-frame-sampling.md`: scope finalised, verification criteria populated,
+  research findings appended.
+- `docs/0.0/RESEARCH-BACKLOG.md`: PR-022 status; known gaps recorded (36 non-conforming March
+  timelines + runner skip logic; server `job.json` records no profile).
+- `CHANGELOG.md`: Unreleased entry.
+- `CLAUDE.md`: Key Configuration updated for `[vision.adaptive]`.

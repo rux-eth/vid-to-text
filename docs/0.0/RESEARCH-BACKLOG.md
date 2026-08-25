@@ -63,7 +63,7 @@ Closing these gaps is **not** in PR-019's scope ("one PR, one thing"). It is a c
 |----|-----------------|--------------------------|
 | [PR-018](../../prs/PR-018-causal-vision-context.md) | `design-research ✗` | **Non-conforming — see below.** Retrofit to `PR-TEMPLATE.md` and backfill research: (a) look-ahead contamination in LLM-derived corpora, (b) whether audio-conditioned visual descriptions are defensible for exploratory research use, (c) evaluation method for the fix. |
 | [PR-020](../../prs/PR-020-market-research-capture-config.md) | **`implementation-cleared 2026-08-24`** — CLOSED | Complete through Phase 5.5. 8 must-answer questions: 5 at Tier A, 3 at Tier B. Group D run. Outcome Amend (5 amendments). Implementation reviewed, 2 defects found and fixed. **Phase 5.5: Confirm on all locked dimensions, ESCALATE on `vision.fps`** — ships unset behind a validation sentinel; mechanism escalated to PR-022. |
-| [PR-022](../../prs/PR-022-content-adaptive-frame-sampling.md) | `design-research ~` | Content-adaptive frame sampling. Motivation measured on this corpus (change rate 48-72s vs fps oversampling 11-90x); mechanism unresearched. **Requires `PROCEDURE-design-planning.md` first** — PR-020 Phase 5.5 escalated here, so the premise is a design question. Carries the deferred `repetition_report_thold` calibration. |
+| [PR-022](../../prs/PR-022-content-adaptive-frame-sampling.md) | `design-research ✓` (session 2026-08-24, Tier A + Tier C) · `state-assessed 2026-08-24` · `fully-researched 2026-08-24` · `implementation-cleared 2026-08-24` | Content-adaptive frame sampling. Design session complete: hybrid floor + trigger + cap, real PTS, token pre-flight, provenance, window-scored repetition. Residual uncertainty recorded: hybrid-vs-uniform quality on static screen content is unmeasured in the literature and unmeasurable here (no metric); fixed mode retained. **Approval gates waived by the user for this PR (2026-08-24).** |
 | [PR-021](../../prs/PR-021-vision-grounded-asr-correction.md) | `design-research ~` | Vision-grounded ASR correction — the documented-beneficial direction PR-020 surfaced. Partial basis from PR-020 Q3; needs its own full procedure. Follow-on to PR-020, not a prerequisite. |
 
 ### PR-018 non-conformance (recorded)
@@ -90,6 +90,23 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
 - **No version tags exist.** Landed PRs are attributed `v0.0 (untagged)`. The first real cut should establish the tag per `docs/VERSIONING.md` §7.
 
 - **`CLAUDE.md` § Remote server access is stale.** It states "the server is launched manually and foreground when needed — there is no systemd unit, launch script, or persistent log file." As of 2026-08-24 all three exist on the desktop: a `vtt-server.service` systemd unit (`Restart=always`, enabled at boot), `~/vid-to-text/start-vtt-server.sh`, and timestamped logs under `~/.vid-to-text/logs/`. These were installed while deploying an unrelated UTF-8 panic fix. Correcting this section is **out of PR-019's scope** ("one PR, one thing") and needs its own work item — it is a project-doc accuracy fix, not template scaffolding.
+
+- **36 of the 74 corpus videos have cache timelines from 2026-03-30/31 under the pre-PR-020 config**
+  (fps 2.0, transcript-conditioned with full look-ahead, pre-beam-5). They violate the locked
+  constraints, and `~/Documents/seer_archive/bin/stage-videos.sh` treats "has a cache entry" as
+  "done", so a corpus run as tooled would skip them. Found in PR-022's state assessment; outside the
+  repo; needs its own work item before the corpus run.
+- **Server-side results record no capture provenance** (`~/.vid-to-text/server/results/<job>/job.json`
+  holds only id/source/status). PR-022 adds provenance to the timeline itself; the server-side record
+  remains a gap.
+- **`CLAUDE.md` § Remote server access** also states the repo "is checked out" at `~/vid-to-text/` on
+  the desktop; it is an unversioned file copy (verified 2026-08-24: `fatal: not a git repository`).
+  Same work item as the systemd staleness above.
+- **Frame downscaling** would cut per-frame vision cost ~57% at 720p (measured 2,042 → 882 tokens) but
+  chart-text legibility at 720p is unmeasured. Candidate follow-on; not a PR-022 dimension.
+- **Hybrid-vs-uniform description quality on static screen content** cannot be measured with any
+  metric found (PR-020 Phase 5.5 Finding 1; Tier C harness `wf_bef168b0-50b` caveats). Open until a
+  reference-based evaluation exists.
 
 ## How to update this document
 

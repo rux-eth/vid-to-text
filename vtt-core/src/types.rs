@@ -18,6 +18,13 @@ pub struct Segment {
     pub start: String,
     pub end: String,
     pub content: String,
+    /// Capture timestamps (HH:MM:SS.mmm) of the frames a visual segment was
+    /// generated from. Empty for speech/sound segments and omitted from JSON when
+    /// empty, so older timelines and checkpoints deserialise unchanged. Under
+    /// content-adaptive sampling this is the only record of which instants the
+    /// model actually saw. (PR-022)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<String>,
 }
 
 /// A time-bounded segment of a video, used as the unit of processing.
@@ -52,6 +59,43 @@ pub struct Timeline {
     pub source: String,
     pub duration_seconds: f64,
     pub segments: Vec<Segment>,
+    /// How the visual track was captured. Fixed-fps output is reconstructible
+    /// from segment spans; adaptive output is data-dependent and is not, so the
+    /// parameters travel with the data. Omitted when absent. (PR-022)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureInfo>,
+}
+
+/// Frame-selection mode recorded in `CaptureInfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SamplingMode {
+    Fixed,
+    Adaptive,
+}
+
+/// Capture provenance for a timeline: the parameters that determine which
+/// frames the vision model saw and how it was prompted. (PR-022)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureInfo {
+    pub vision_model: String,
+    pub whisper_model: String,
+    pub chunk_duration_secs: u32,
+    /// Candidate rate in adaptive mode; sample rate in fixed mode.
+    pub fps: f32,
+    pub sampling: SamplingMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gap_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_trigger_interval_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frames_per_chunk: Option<u32>,
+    pub max_frames_per_request: u32,
+    pub use_transcript: bool,
+    pub transcript_window: String,
+    pub temperature: f32,
 }
 
 /// Format seconds into HH:MM:SS.mmm timestamp string.
@@ -120,10 +164,72 @@ mod tests {
             start: "00:01:12.400".to_string(),
             end: "00:01:15.800".to_string(),
             content: "Have you seen this before?".to_string(),
+            frames: Vec::new(),
         };
         let json = serde_json::to_string(&segment).unwrap();
         let deserialized: Segment = serde_json::from_str(&json).unwrap();
         assert_eq!(segment, deserialized);
+    }
+
+    /// PR-022: `frames` is provenance for visual segments. It must not appear in
+    /// JSON when empty (speech/sound, and every pre-PR-022 timeline), and JSON
+    /// written before the field existed must still deserialise.
+    #[test]
+    fn test_segment_frames_omitted_when_empty_and_legacy_json_loads() {
+        let speech = Segment {
+            segment_type: SegmentType::Speech,
+            start: "00:00:00.000".to_string(),
+            end: "00:00:01.000".to_string(),
+            content: "hi".to_string(),
+            frames: Vec::new(),
+        };
+        let json = serde_json::to_string(&speech).unwrap();
+        assert!(!json.contains("frames"), "empty frames must be omitted: {json}");
+
+        let legacy = r#"{"type":"visual","start":"00:00:00.000","end":"00:00:07.500","content":"x"}"#;
+        let seg: Segment = serde_json::from_str(legacy).unwrap();
+        assert!(seg.frames.is_empty());
+
+        let visual = Segment {
+            frames: vec!["00:00:00.000".to_string(), "00:00:12.500".to_string()],
+            ..seg
+        };
+        let json = serde_json::to_string(&visual).unwrap();
+        let back: Segment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.frames.len(), 2);
+        assert_eq!(back.frames[1], "00:00:12.500");
+    }
+
+    /// PR-022: capture provenance is optional on the wire in both directions.
+    #[test]
+    fn test_timeline_capture_optional_roundtrip() {
+        let legacy = r#"{"source":"v.mp4","duration_seconds":10.0,"segments":[]}"#;
+        let t: Timeline = serde_json::from_str(legacy).unwrap();
+        assert!(t.capture.is_none());
+        assert!(!serde_json::to_string(&t).unwrap().contains("capture"));
+
+        let with = Timeline {
+            capture: Some(CaptureInfo {
+                vision_model: "qwen3-vl:8b-instruct-q8_0".to_string(),
+                whisper_model: "ggml-large-v3-turbo.bin".to_string(),
+                chunk_duration_secs: 180,
+                fps: 2.0,
+                sampling: SamplingMode::Adaptive,
+                scene_threshold: Some(0.08),
+                max_gap_secs: Some(15.0),
+                min_trigger_interval_secs: Some(2.0),
+                max_frames_per_chunk: Some(45),
+                max_frames_per_request: 15,
+                use_transcript: false,
+                transcript_window: "causal".to_string(),
+                temperature: 0.0,
+            }),
+            ..t
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains("\"sampling\":\"adaptive\""), "{json}");
+        let back: Timeline = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with);
     }
 
     #[test]
@@ -176,20 +282,24 @@ mod tests {
                     start: "00:01:12.400".to_string(),
                     end: "00:01:15.800".to_string(),
                     content: "Have you seen this before?".to_string(),
+                    frames: Vec::new(),
                 },
                 Segment {
                     segment_type: SegmentType::Visual,
                     start: "00:01:12.000".to_string(),
                     end: "00:01:18.000".to_string(),
                     content: "A woman turns toward the camera in a dimly lit hallway.".to_string(),
+                    frames: Vec::new(),
                 },
                 Segment {
                     segment_type: SegmentType::Sound,
                     start: "00:01:14.000".to_string(),
                     end: "00:01:16.500".to_string(),
                     content: "door creaking".to_string(),
+                    frames: Vec::new(),
                 },
             ],
+            capture: None,
         };
         let json = serde_json::to_string_pretty(&timeline).unwrap();
         let deserialized: Timeline = serde_json::from_str(&json).unwrap();

@@ -45,7 +45,7 @@ vid-to-text doctor
 
 ## Architecture
 
-Client/server split: `vtt-client` (laptop) sends mp4 files or YouTube URLs over HTTP to `vtt-server` (desktop with GPU). Server chunks video via ffmpeg, then for each chunk: runs Whisper on CPU first, passes the transcript to Qwen3-VL on GPU for context-aware visual description. Visual segments are produced per batch (~7.5s granularity at 2fps/15 frames). All segments are merged into a sorted JSON timeline and returned to the client.
+Client/server split: `vtt-client` (laptop) sends mp4 files or YouTube URLs over HTTP to `vtt-server` (desktop with GPU). Server chunks video via ffmpeg, then for each chunk: runs Whisper on CPU first, passes the transcript to Qwen3-VL on GPU for context-aware visual description. Frames are selected per chunk either at a fixed rate or content-adaptively (uniform floor + scene-change triggers; see `docs/ARCHITECTURE.md` § Frame Sampling), and visual segments are produced per request batch with real frame timestamps. All segments are merged into a sorted JSON timeline and returned to the client.
 
 The `format` command runs client-side only — reads the JSON, sends to OpenAI API, writes Markdown.
 
@@ -118,7 +118,11 @@ ssh-desktop 'cd ~/vid-to-text && cargo run --release -p vtt-server'
 - `ollama.model` — vision model (recommended: `qwen3-vl:8b-instruct-q8_0`)
 - `ollama.num_ctx` — context window for multi-image requests (default 65536)
 - `vision.max_frames_per_request` — frames per Ollama batch (default 15)
-- `vision.fps` — frame extraction rate (default 2.0)
+- `vision.fps` — frame candidate rate (default 2.0); in fixed mode every candidate is kept
+- `[vision.adaptive]` — `enabled` (default false), `scene_threshold`, `max_gap_secs`,
+  `min_trigger_interval_secs`, `max_frames_per_chunk` — see `docs/ARCHITECTURE.md` § Frame Sampling
+- `ollama.prompt_reserve_tokens` — context reserved for prompt text in the per-request token pre-flight
+- `whisper.repetition_window_secs` — window over which the post-hoc repetition report is scored
 - `ffmpeg.chunk_duration_secs` — chunk size (default 180)
 
 **Client** (`~/.vid-to-text/config/client.toml`):

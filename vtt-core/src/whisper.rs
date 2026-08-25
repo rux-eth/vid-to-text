@@ -179,6 +179,7 @@ pub fn transcribe(
                 start: format_timestamp(start_seconds),
                 end: format_timestamp(end_seconds),
                 content,
+                frames: Vec::new(),
             });
         }
     }
@@ -228,15 +229,17 @@ pub fn compression_ratio(text: &str) -> f64 {
     }
 }
 
-/// One flagged segment. Carries a copy of the timestamps, never a mutable handle.
+/// One flagged window. Carries copies of the timestamps, never a mutable handle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepetitionFlag {
     pub start: String,
     pub end: String,
     pub ratio: f64,
+    /// Number of speech segments in the flagged window.
+    pub segments: usize,
 }
 
-/// Flag speech segments whose compression ratio exceeds `threshold`.
+/// Flag windows of speech whose compression ratio exceeds `threshold`.
 ///
 /// This DIAGNOSES, it does not filter. Segments are never edited, truncated or
 /// dropped -- the Segments Are Immutable After Merge constraint forbids it, and the
@@ -248,29 +251,42 @@ pub struct RepetitionFlag {
 /// at generation time. Whisper output has no such guard, which is the asymmetry this
 /// closes. (PR-020 Q5, Group D)
 ///
-/// # Known limitation: the threshold is inherited from a different unit of analysis
+/// # Unit of analysis: windows, not segments (PR-022)
 ///
 /// OpenAI Whisper computes `compression_ratio` over a whole **30-second decode
-/// window** and thresholds it at 2.4. This function scores each **segment**
-/// individually, and segments are shorter, so they compress worse and score lower.
-/// The 2.4 default is therefore **conservative here and will under-flag**: measured
-/// on one corpus video, 326 clean segments topped out at 1.70 while a genuine
-/// hallucinated loop scored 8.18. The egregious case is caught; a moderate loop
-/// scoring ~2.0 would pass silently.
-///
-/// The threshold is deliberately NOT retuned to that single video -- one video is not
-/// a calibration set, and ad-hoc tuning is what PR-020 exists to eliminate.
-/// Calibration is a PR-020 Phase 5.5 item.
-pub fn repetition_report(segments: &[Segment], threshold: f64) -> Vec<RepetitionFlag> {
-    segments
+/// window** and thresholds it at 2.4. Scoring individual segments under-flags,
+/// because short segments compress worse: on this corpus a genuine loop spread over
+/// fifteen short segments ("So let's go to the 4th hour." x15, beam-5 transcript of
+/// `2024_2_12`) scored 0.85 per segment and 4.90 per window. Consecutive speech
+/// segments are therefore grouped into windows of `window_secs` by start time and
+/// scored jointly, which is the unit the threshold was calibrated on.
+pub fn repetition_report(segments: &[Segment], threshold: f64, window_secs: f64) -> Vec<RepetitionFlag> {
+    let speech: Vec<&Segment> = segments
         .iter()
         .filter(|s| s.segment_type == SegmentType::Speech)
-        .filter_map(|s| {
-            let ratio = compression_ratio(&s.content);
+        .collect();
+    let mut windows: Vec<Vec<&Segment>> = Vec::new();
+    let mut window_start = 0.0;
+    for seg in speech {
+        let start = crate::parse_timestamp(&seg.start).unwrap_or(0.0);
+        match windows.last_mut() {
+            Some(current) if start - window_start < window_secs => current.push(seg),
+            _ => {
+                windows.push(vec![seg]);
+                window_start = start;
+            }
+        }
+    }
+    windows
+        .into_iter()
+        .filter_map(|w| {
+            let text = w.iter().map(|s| s.content.as_str()).collect::<Vec<_>>().join(" ");
+            let ratio = compression_ratio(&text);
             (ratio > threshold).then(|| RepetitionFlag {
-                start: s.start.clone(),
-                end: s.end.clone(),
+                start: w[0].start.clone(),
+                end: w[w.len() - 1].end.clone(),
                 ratio,
+                segments: w.len(),
             })
         })
         .collect()
@@ -287,6 +303,7 @@ mod tests {
             start: format_timestamp(start),
             end: format_timestamp(end),
             content: content.to_string(),
+            frames: Vec::new(),
         }
     }
 
@@ -336,10 +353,15 @@ mod tests {
             make_segment(SegmentType::Visual, 10.0, 15.0, &looped),
         ];
         let before: Vec<String> = segs.iter().map(|s| s.content.clone()).collect();
-        let report = repetition_report(&segs, 2.4);
+        let report = repetition_report(&segs, 2.4, 30.0);
 
         assert_eq!(report.len(), 1, "only the SPEECH loop is reported");
-        assert_eq!(report[0].start, "00:00:05.000");
+        // PR-022: the flag names the 30 s WINDOW containing the loop (both speech
+        // segments), not the looping segment alone -- the unit the threshold was
+        // calibrated on.
+        assert_eq!(report[0].start, "00:00:00.000");
+        assert_eq!(report[0].end, "00:00:10.000");
+        assert_eq!(report[0].segments, 2);
         assert!(report[0].ratio > 2.4);
 
         let after: Vec<String> = segs.iter().map(|s| s.content.clone()).collect();
@@ -589,5 +611,47 @@ mod tests {
 
         let segments = transcribe_chunk(model, wav_path, chunk).await.unwrap();
         let _ = segments;
+    }
+    // --- PR-022: window-scored repetition ---
+
+    /// The corpus case: a loop spread over many short segments. Per-segment
+    /// scoring cannot flag it (each segment is too short to compress well); a 30 s
+    /// window can. Pins the reason the unit of analysis changed.
+    #[test]
+    fn test_repetition_report_window_catches_loop_split_across_short_segments() {
+        let segs: Vec<Segment> = (0..15)
+            .map(|i| make_segment(SegmentType::Speech, 597.0 + i as f64 * 2.0, 599.0 + i as f64 * 2.0, "So let's go to the 4th hour."))
+            .collect();
+        // no individual segment crosses 2.4
+        assert!(segs.iter().all(|s| compression_ratio(&s.content) <= 2.4));
+        let flags = repetition_report(&segs, 2.4, 30.0);
+        assert_eq!(flags.len(), 1, "one window, one flag: {flags:?}");
+        assert_eq!(flags[0].segments, 15);
+        assert_eq!(flags[0].start, format_timestamp(597.0));
+        assert_eq!(flags[0].end, format_timestamp(599.0 + 14.0 * 2.0));
+        assert!(flags[0].ratio > 2.4);
+    }
+
+    #[test]
+    fn test_repetition_report_windows_split_by_start_time() {
+        // two loops 100 s apart must be two windows, not one
+        let mut segs: Vec<Segment> = (0..10).map(|i| make_segment(SegmentType::Speech, i as f64 * 2.0, i as f64 * 2.0 + 1.5, "again and again")).collect();
+        segs.extend((0..10).map(|i| make_segment(SegmentType::Speech, 100.0 + i as f64 * 2.0, 101.5 + i as f64 * 2.0, "over and over")));
+        let flags = repetition_report(&segs, 2.4, 30.0);
+        assert_eq!(flags.len(), 2);
+        assert_eq!(flags[0].start, format_timestamp(0.0));
+        assert_eq!(flags[1].start, format_timestamp(100.0));
+    }
+
+    #[test]
+    fn test_repetition_report_varied_speech_not_flagged_and_visual_ignored() {
+        let segs = vec![
+            make_segment(SegmentType::Speech, 0.0, 3.0, "Bitcoin held the yearly open near forty-two thousand."),
+            make_segment(SegmentType::Speech, 3.0, 6.0, "Volume on the four-hour is thinning into the weekend."),
+            make_segment(SegmentType::Speech, 6.0, 9.0, "Watch the fifty-day moving average as support."),
+            make_segment(SegmentType::Visual, 0.0, 7.5, "chart chart chart chart chart chart chart chart chart chart chart chart chart chart"),
+        ];
+        assert!(repetition_report(&segs, 2.4, 30.0).is_empty());
+        assert!(repetition_report(&[], 2.4, 30.0).is_empty());
     }
 }

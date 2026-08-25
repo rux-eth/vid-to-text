@@ -106,6 +106,20 @@ alone. "Textual sources that contain hindsight" are a named leakage vector, and 
 described as something "inspection of the pipeline code cannot rule out."
 See `prs/PR-020-market-research-capture-config.md` Research findings, Q4.
 
+### Visual Timestamps Are Frame Timestamps
+
+Every visual segment's `start` and `end` derive from the real presentation timestamps of the frames
+it was generated from, never from arithmetic that assumes uniform spacing. Frame extraction must
+produce those timestamps alongside the frames, and a mismatch between the frames written and the
+timestamps recorded fails the chunk rather than guessing.
+
+**Why:** under content-adaptive sampling there is no `seconds_per_frame`; arithmetic would label
+every segment plausibly and wrongly. These timestamps also bound the transcript window, so they are
+what enforces Corpus Look-Ahead Freedom when the transcript is used.
+
+**Research basis:** `prs/PR-022-content-adaptive-frame-sampling.md`; `docs/0.0/DESIGN-log.md`
+session 2026-08-24, decision 5.
+
 ### No Audio Data on GPU (v1)
 
 Whisper runs on CPU only. The full 24GB of GPU VRAM is reserved for Qwen3-VL. This prevents OOM conditions during parallel processing.

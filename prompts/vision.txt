@@ -24,8 +24,8 @@ Specification:
 - Scale your description to match the visual complexity: a static talking head needs a brief description, while a rapid sequence of cuts with new characters and locations needs more detail
 
 Parameters:
-- You will receive between 1 and 30 video frames per request
-- Frames are extracted at regular intervals (typically 2fps) and are in chronological order
+- You will receive a sequence of video frames per request, in chronological order
+- Frames are captured when the screen content changes and at a guaranteed minimum rate, so they may be unevenly spaced; each frame's capture time is listed at the end of this prompt
 - You may receive an audio transcript for the segment and/or context from the previous segment
 - Your output will be stored as a single visual segment with a timestamp range
 - Focus on visual content — do not repeat the transcript back, but do reference it when connecting visuals to speech

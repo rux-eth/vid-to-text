@@ -183,10 +183,16 @@ pub struct WhisperConfig {
     pub entropy_thold: f32,
     pub logprob_thold: f32,
     pub no_speech_thold: f32,
-    /// Post-hoc compression-ratio threshold for flagging repetitive speech segments.
+    /// Post-hoc compression-ratio threshold for flagging repetitive speech.
     /// 2.4 matches OpenAI Whisper's own `compression_ratio_threshold`. Diagnostic
-    /// only -- flagged segments are reported, never edited. (PR-020 Q5)
+    /// only -- flagged windows are reported, never edited. (PR-020 Q5)
     pub repetition_report_thold: f64,
+    /// Window over which the compression ratio is scored, in seconds. OpenAI
+    /// calibrated 2.4 over 30-second decode windows; per-segment scoring
+    /// under-flags because short segments compress worse. Re-scoring this
+    /// corpus over 30 s windows recovered two real loops that per-segment
+    /// scoring missed, one in a beam-5 transcript. (PR-022, decision 9)
+    pub repetition_window_secs: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +215,17 @@ pub struct OllamaConfig {
     /// A fixed seed is deliberately NOT set: a seed governs the sampling step, and
     /// greedy decoding has none, so it would be inert. See PR-020 Q7.
     pub temperature: f32,
+    /// Context tokens reserved for prompt text (template, transcript window,
+    /// per-frame time labels) in the per-request pre-flight check:
+    /// `max_frames_per_request * tokens_per_frame + prompt_reserve_tokens <= num_ctx`.
+    /// Ollama truncates an over-long prompt silently, so the check fails the job
+    /// before any GPU time is spent. (PR-022, decision 4)
+    pub prompt_reserve_tokens: u32,
+    /// Pixels per visual token axis for the served model. Qwen3-VL uses 16-px
+    /// patches with 2x2 spatial merge = 32 px; measured on the deployed stack a
+    /// frame costs `ceil(w/32) * ceil(h/32) + 2` tokens (1080p = 2042, 720p = 882,
+    /// 360p = 222). Change if the vision model changes. (PR-022)
+    pub vision_patch_px: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +243,63 @@ pub struct VisionConfig {
     /// independent observations of the frames; with it enabled, 98% of them
     /// cite the audio and are not independent evidence.
     pub use_transcript: bool,
+    /// Content-adaptive frame selection. Disabled by default, so every numeric
+    /// `fps` profile keeps its exact previous behaviour. (PR-022)
+    pub adaptive: AdaptiveSamplingConfig,
+}
+
+/// Content-adaptive frame selection within each chunk (PR-022).
+///
+/// Frames are evaluated at the candidate rate `vision.fps`. A frame is kept when
+/// it is the first of the chunk, or `max_gap_secs` have passed since the last
+/// kept frame (the floor), or its ffmpeg `scene` score exceeds `scene_threshold`
+/// and `min_trigger_interval_secs` have passed since the last kept frame (a
+/// trigger). A chunk exceeding `max_frames_per_chunk` drops its lowest-scoring
+/// triggers, never floor frames.
+///
+/// `scene` compares each candidate with the previous candidate, so it detects
+/// change ONSETS (a chart switch, the start of a pan) and not settled states;
+/// settled states and small-region changes are captured by the floor. Values
+/// below were measured on the market-research corpus (0.037 = crosshair redraw,
+/// 0.076/0.126 = chart pan steps, 0.448 = slide change); other content should be
+/// re-characterised before these are trusted. See docs/ARCHITECTURE.md.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveSamplingConfig {
+    pub enabled: bool,
+    /// ffmpeg `select` scene score in (0, 1) above which a candidate is a trigger.
+    pub scene_threshold: f64,
+    /// Floor: guaranteed maximum time between kept frames, in seconds.
+    pub max_gap_secs: f64,
+    /// Refractory: minimum time between a kept frame and the next trigger, in
+    /// seconds. De-clusters bursts during redraws (13-28% of raw triggers).
+    pub min_trigger_interval_secs: f64,
+    /// Ceiling on kept frames per chunk. Must be at least the floor count
+    /// `ceil(chunk_duration_secs / max_gap_secs)`.
+    pub max_frames_per_chunk: u32,
+}
+
+impl Default for AdaptiveSamplingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scene_threshold: 0.08,
+            max_gap_secs: 15.0,
+            min_trigger_interval_secs: 2.0,
+            max_frames_per_chunk: 45,
+        }
+    }
+}
+
+impl AdaptiveSamplingConfig {
+    /// Number of floor frames a chunk of `chunk_secs` is guaranteed to keep:
+    /// the first frame plus one every `max_gap_secs`.
+    pub fn floor_frames(&self, chunk_secs: f64) -> u32 {
+        if self.max_gap_secs <= 0.0 {
+            return 1;
+        }
+        (chunk_secs / self.max_gap_secs).ceil().max(1.0) as u32
+    }
 }
 
 /// Scope of speech made visible to the vision model for a given batch.
@@ -338,6 +412,7 @@ impl Default for WhisperConfig {
             logprob_thold: -1.0,
             no_speech_thold: 0.6,
             repetition_report_thold: 2.4,
+            repetition_window_secs: 30.0,
         }
     }
 }
@@ -353,6 +428,8 @@ impl Default for OllamaConfig {
             timeout_seconds: 300,
             num_ctx: 65536,
             temperature: 0.0,
+            prompt_reserve_tokens: 4096,
+            vision_patch_px: 32,
         }
     }
 }
@@ -365,6 +442,7 @@ impl Default for VisionConfig {
             max_frames_per_request: 15,
             transcript_window: TranscriptWindow::Full,
             use_transcript: true,
+            adaptive: AdaptiveSamplingConfig::default(),
         }
     }
 }
@@ -445,10 +523,54 @@ impl ServerConfig {
         if self.vision.fps <= 0.0 {
             return Err(VttError::Config(
                 "vision.fps must be greater than 0. If a profile set it to 0, that is the \
-                 deliberately-unset sentinel: no published evidence supports a sampling rate \
-                 for static screencast content, so the value is decided by PR-020 Phase 5.5 \
-                 measurement. Set vision.fps explicitly in the profile before running."
+                 deliberately unset sentinel PR-020 shipped while the sampling mechanism was \
+                 undecided; PR-022 decided it (see docs/ARCHITECTURE.md, Frame Sampling). \
+                 Set vision.fps explicitly in the profile before running."
                     .into(),
+            ));
+        }
+        if self.vision.adaptive.enabled {
+            let a = &self.vision.adaptive;
+            if !(a.scene_threshold > 0.0 && a.scene_threshold < 1.0) {
+                return Err(VttError::Config(format!(
+                    "vision.adaptive.scene_threshold must be in (0, 1), got {}",
+                    a.scene_threshold
+                )));
+            }
+            if a.max_gap_secs <= 0.0 {
+                return Err(VttError::Config(
+                    "vision.adaptive.max_gap_secs must be greater than 0".into(),
+                ));
+            }
+            if a.max_gap_secs * (self.vision.fps as f64) < 1.0 {
+                return Err(VttError::Config(format!(
+                    "vision.adaptive.max_gap_secs ({}) is shorter than one candidate interval at \
+                     vision.fps {} (the floor cannot be honoured below 1/fps seconds)",
+                    a.max_gap_secs, self.vision.fps
+                )));
+            }
+            if a.min_trigger_interval_secs < 0.0 {
+                return Err(VttError::Config(
+                    "vision.adaptive.min_trigger_interval_secs must not be negative".into(),
+                ));
+            }
+            let floor = a.floor_frames(self.ffmpeg.chunk_duration_secs as f64);
+            if a.max_frames_per_chunk < floor {
+                return Err(VttError::Config(format!(
+                    "vision.adaptive.max_frames_per_chunk ({}) is below the floor count ({}) for \
+                     chunk_duration_secs {} at max_gap_secs {}; the cap would have to drop floor frames",
+                    a.max_frames_per_chunk, floor, self.ffmpeg.chunk_duration_secs, a.max_gap_secs
+                )));
+            }
+        }
+        if self.ollama.vision_patch_px == 0 {
+            return Err(VttError::Config(
+                "ollama.vision_patch_px must be greater than 0".into(),
+            ));
+        }
+        if self.whisper.repetition_window_secs <= 0.0 {
+            return Err(VttError::Config(
+                "whisper.repetition_window_secs must be greater than 0".into(),
             ));
         }
         if self.vision.max_tokens == 0 {
@@ -929,7 +1051,7 @@ listen_port = "not a number"
         let msg = format!("{err}");
         assert!(msg.contains("vision.fps"), "message must name the key: {msg}");
         assert!(
-            msg.contains("deliberately unset") || msg.contains("Phase 5.5"),
+            msg.contains("deliberately unset") || msg.contains("PR-022"),
             "message must explain the deliberate-unset case, not just 'must be > 0': {msg}"
         );
     }
@@ -1035,5 +1157,167 @@ listen_port = "not a number"
         let mut config = ServerConfig::default();
         config.ytdlp.timeout_seconds = 0;
         assert!(config.validate().is_err());
+    }
+    // --- PR-022: adaptive sampling config ---
+
+    /// Absent `[vision.adaptive]` must mean disabled, so every numeric-fps profile
+    /// written before PR-022 behaves exactly as it did.
+    #[test]
+    fn test_adaptive_absent_means_disabled_and_defaults_are_calibrated_values() {
+        let toml_str = r#"
+[vision]
+fps = 0.5
+"#;
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.vision.adaptive.enabled);
+        assert_eq!(config.vision.fps, 0.5);
+        let d = AdaptiveSamplingConfig::default();
+        assert_eq!(d.scene_threshold, 0.08);
+        assert_eq!(d.max_gap_secs, 15.0);
+        assert_eq!(d.min_trigger_interval_secs, 2.0);
+        assert_eq!(d.max_frames_per_chunk, 45);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_adaptive_table_parses_and_validates() {
+        let toml_str = r#"
+[vision]
+fps = 2.0
+[vision.adaptive]
+enabled = true
+scene_threshold = 0.1
+max_gap_secs = 30.0
+min_trigger_interval_secs = 2.0
+max_frames_per_chunk = 45
+"#;
+        let config: ServerConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.vision.adaptive.enabled);
+        assert_eq!(config.vision.adaptive.scene_threshold, 0.1);
+        assert_eq!(config.vision.adaptive.max_gap_secs, 30.0);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_adaptive_validation_rejects_bad_values() {
+        let mut config = ServerConfig::default();
+        config.vision.adaptive.enabled = true;
+
+        config.vision.adaptive.scene_threshold = 0.0;
+        assert!(config.validate().unwrap_err().to_string().contains("scene_threshold"));
+        config.vision.adaptive.scene_threshold = 1.0;
+        assert!(config.validate().unwrap_err().to_string().contains("scene_threshold"));
+        config.vision.adaptive.scene_threshold = 0.08;
+
+        config.vision.adaptive.max_gap_secs = 0.0;
+        assert!(config.validate().unwrap_err().to_string().contains("max_gap_secs"));
+        // Floor shorter than one candidate interval: 0.25 fps => 4 s per candidate.
+        config.vision.fps = 0.25;
+        config.vision.adaptive.max_gap_secs = 2.0;
+        assert!(config.validate().unwrap_err().to_string().contains("candidate interval"));
+        config.vision.fps = 2.0;
+        config.vision.adaptive.max_gap_secs = 15.0;
+
+        config.vision.adaptive.min_trigger_interval_secs = -1.0;
+        assert!(config.validate().unwrap_err().to_string().contains("min_trigger_interval_secs"));
+        config.vision.adaptive.min_trigger_interval_secs = 2.0;
+
+        // Cap below the floor count (180 s / 15 s = 12 floor frames).
+        config.vision.adaptive.max_frames_per_chunk = 11;
+        let msg = config.validate().unwrap_err().to_string();
+        assert!(msg.contains("max_frames_per_chunk") && msg.contains("floor count (12)"), "{msg}");
+        config.vision.adaptive.max_frames_per_chunk = 12;
+        assert!(config.validate().is_ok());
+    }
+
+    /// The same bad values must be IGNORED when adaptive sampling is disabled, or
+    /// a stale `[vision.adaptive]` table could block a fixed-fps profile.
+    #[test]
+    fn test_adaptive_values_not_validated_when_disabled() {
+        let mut config = ServerConfig::default();
+        config.vision.adaptive.enabled = false;
+        config.vision.adaptive.scene_threshold = 5.0;
+        config.vision.adaptive.max_frames_per_chunk = 0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_floor_frames_counts_first_frame_plus_every_gap() {
+        let a = AdaptiveSamplingConfig { max_gap_secs: 15.0, ..Default::default() };
+        assert_eq!(a.floor_frames(180.0), 12);
+        let a = AdaptiveSamplingConfig { max_gap_secs: 30.0, ..Default::default() };
+        assert_eq!(a.floor_frames(180.0), 6);
+        assert_eq!(a.floor_frames(10.0), 1);
+        assert_eq!(a.floor_frames(31.0), 2);
+    }
+
+    /// The profile mechanism serialises the base config to TOML, deep-merges the
+    /// profile, and deserialises the result. A nested table must survive that
+    /// round-trip -- this is why `fps = "auto"` was rejected in design.
+    #[test]
+    fn test_adaptive_table_survives_profile_merge_roundtrip() {
+        let base = ServerConfig::default();
+        let base_str = toml::to_string(&base).unwrap();
+        let mut base_val: toml::Value = toml::from_str(&base_str).unwrap();
+        let overrides: toml::Value = toml::from_str(
+            "[vision]\nfps = 2.0\n[vision.adaptive]\nenabled = true\nmax_gap_secs = 30.0\n",
+        )
+        .unwrap();
+        merge_toml(&mut base_val, &overrides);
+        let merged: ServerConfig = base_val.try_into().unwrap();
+        assert!(merged.vision.adaptive.enabled);
+        assert_eq!(merged.vision.adaptive.max_gap_secs, 30.0);
+        // untouched keys keep their defaults
+        assert_eq!(merged.vision.adaptive.scene_threshold, 0.08);
+        assert_eq!(merged.vision.max_frames_per_request, 15);
+    }
+
+    #[test]
+    fn test_new_ollama_and_whisper_fields_default_and_validate() {
+        let config = ServerConfig::default();
+        assert_eq!(config.ollama.prompt_reserve_tokens, 4096);
+        assert_eq!(config.ollama.vision_patch_px, 32);
+        assert_eq!(config.whisper.repetition_window_secs, 30.0);
+        let mut bad = config.clone();
+        bad.whisper.repetition_window_secs = 0.0;
+        assert!(bad.validate().unwrap_err().to_string().contains("repetition_window_secs"));
+        let mut bad = config;
+        bad.ollama.vision_patch_px = 0;
+        assert!(bad.validate().unwrap_err().to_string().contains("vision_patch_px"));
+    }
+    /// Guard the repo's locked profile against TOML table re-homing: a key that
+    /// follows a `[vision.adaptive]` header belongs to that table, so placing the
+    /// header above `use_transcript` silently reverted two locked values to their
+    /// defaults (caught by the capture provenance on the first PR-022 validation
+    /// run). This test loads the actual file and asserts every locked value.
+    #[test]
+    fn test_market_research_profile_locked_values_survive_table_layout() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/profiles/market-research.toml");
+        let text = std::fs::read_to_string(path).expect("repo profile present");
+        let overrides: toml::Value = toml::from_str(&text).unwrap();
+        let mut base_val: toml::Value = toml::from_str(&toml::to_string(&ServerConfig::default()).unwrap()).unwrap();
+        merge_toml(&mut base_val, &overrides);
+        let cfg: ServerConfig = base_val.try_into().unwrap();
+        assert!(!cfg.vision.use_transcript, "use_transcript must be false (PR-020 Q3)");
+        assert_eq!(cfg.vision.transcript_window, TranscriptWindow::Causal, "PR-020 Q4");
+        assert_eq!(cfg.vision.fps, 2.0);
+        assert!(cfg.vision.adaptive.enabled);
+        assert_eq!(cfg.vision.adaptive.scene_threshold, 0.08);
+        assert_eq!(cfg.vision.adaptive.max_gap_secs, 15.0);
+        assert_eq!(cfg.vision.adaptive.min_trigger_interval_secs, 2.0);
+        assert_eq!(cfg.vision.adaptive.max_frames_per_chunk, 45);
+        assert_eq!(cfg.whisper.beam_size, 5);
+        assert_eq!(cfg.whisper.initial_prompt, "");
+        assert_eq!(cfg.whisper.repetition_window_secs, 30.0);
+        assert_eq!(cfg.ollama.temperature, 0.0);
+        // no key may have been re-homed under the adaptive table
+        let adaptive = overrides["vision"]["adaptive"].as_table().unwrap();
+        for k in adaptive.keys() {
+            assert!(
+                ["enabled", "scene_threshold", "max_gap_secs", "min_trigger_interval_secs", "max_frames_per_chunk"].contains(&k.as_str()),
+                "unexpected key under [vision.adaptive]: {k}"
+            );
+        }
+        cfg.validate().unwrap();
     }
 }
