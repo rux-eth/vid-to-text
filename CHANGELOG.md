@@ -26,6 +26,19 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
   videos; +34% runtime), so it is not enabled in the locked profile. Kept because it is cheap to
   re-test on other content. (PR-024)
 
+- A chart/screencast vision prompt (`prompts/vision-chart.txt`), selected by
+  `ollama.prompt_template_path` and enabled in the `market-research` profile. The previous prompt was
+  written for TED talks and film clips: nine of its ten instructions presuppose humans, faces and
+  camera work, and 76% of this corpus's visual segments carried absent-human boilerplate as a result.
+  The new prompt also states the interface conventions that produced a fabricated price chronology
+  (a chart header shows the *hovered* candle, not the current price). The general prompt remains the
+  default for non-chart video. (PR-026)
+- Timelines record which vision prompt produced them: `capture.vision_prompt` and
+  `capture.vision_prompt_sha256`. The hash equals `sha256sum` of the prompt file, so a timeline can be
+  checked against what is deployed. Omitted when absent, so older timelines still load. (PR-026)
+- `config/deploy-prompts.sh` deploys `prompts/` to the server by checksum-compare with
+  verify-after — previously nothing deployed prompts at all. (PR-026)
+
 - Guard against degenerate vision output (`vision.max_numeric_run`): a visual description that
   enumerates more than 40 consecutive numbers is truncated at the cap, keeping the legitimate head.
   Catches both observed modes — an arithmetic ramp and a repeated value — which the existing

@@ -119,6 +119,17 @@ pub struct CaptureInfo {
     pub use_transcript: bool,
     pub transcript_window: String,
     pub temperature: f32,
+    /// Which vision prompt produced this timeline: the configured
+    /// `ollama.prompt_template_path`, or `(default_prompt)` when none is set. (PR-026)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_prompt: Option<String>,
+    /// SHA-256 of the prompt template actually used, so a prompt edited in place is
+    /// still distinguishable. Equal to `sha256sum` of the file, so a timeline can be
+    /// compared directly against what is deployed on the GPU host. `None` only when
+    /// the template could not be read. Omitted from JSON when absent, so every
+    /// timeline written before PR-026 still deserialises. (PR-026)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_prompt_sha256: Option<String>,
 }
 
 /// Format seconds into HH:MM:SS.mmm timestamp string.
@@ -246,6 +257,8 @@ mod tests {
                 use_transcript: false,
                 transcript_window: "causal".to_string(),
                 temperature: 0.0,
+                vision_prompt: Some("prompts/vision-chart.txt".to_string()),
+                vision_prompt_sha256: Some("deadbeef".to_string()),
             }),
             ..t
         };
@@ -253,6 +266,16 @@ mod tests {
         assert!(json.contains("\"sampling\":\"adaptive\""), "{json}");
         let back: Timeline = serde_json::from_str(&json).unwrap();
         assert_eq!(back, with);
+
+        // PR-026: a capture block written before prompt provenance existed must still
+        // load -- every timeline on disk today is one of these.
+        let legacy_capture = r#"{"source":"v.mp4","duration_seconds":10.0,"segments":[],
+            "capture":{"vision_model":"m","whisper_model":"w","chunk_duration_secs":180,
+            "fps":2.0,"sampling":"adaptive","max_frames_per_request":15,
+            "use_transcript":false,"transcript_window":"causal","temperature":0.0}}"#;
+        let t2: Timeline = serde_json::from_str(legacy_capture).unwrap();
+        let cap = t2.capture.unwrap();
+        assert!(cap.vision_prompt.is_none() && cap.vision_prompt_sha256.is_none());
     }
 
     #[test]

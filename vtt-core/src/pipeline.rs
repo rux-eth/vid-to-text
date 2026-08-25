@@ -398,6 +398,7 @@ pub fn capture_info(config: &ServerConfig) -> CaptureInfo {
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| config.whisper.model_path.clone());
+    let (prompt_id, prompt_hash) = crate::vision::prompt_provenance(&config.ollama);
     let transcript_window = match config.vision.transcript_window {
         TranscriptWindow::Full => "full",
         TranscriptWindow::Concurrent => "concurrent",
@@ -418,6 +419,8 @@ pub fn capture_info(config: &ServerConfig) -> CaptureInfo {
         use_transcript: config.vision.use_transcript,
         transcript_window,
         temperature: config.ollama.temperature,
+        vision_prompt: Some(prompt_id),
+        vision_prompt_sha256: prompt_hash,
     }
 }
 
@@ -809,5 +812,26 @@ mod tests {
         assert_eq!(adaptive.max_frames_per_chunk, Some(45));
         assert_eq!(adaptive.transcript_window, "causal");
         assert!(!adaptive.use_transcript);
+    }
+
+    /// PR-026: prompt provenance travels with the timeline, so two captures made
+    /// under different prompts are distinguishable in the data. The 2026-08 corpus
+    /// lost 36 timelines to exactly this gap for a different parameter.
+    #[test]
+    fn test_capture_info_records_prompt_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision-chart.txt");
+        std::fs::write(&path, "chart prompt").unwrap();
+        let mut config = ServerConfig::default();
+        config.ollama.prompt_template_path = Some(path.display().to_string());
+
+        let a = capture_info(&config);
+        assert_eq!(a.vision_prompt.as_deref(), Some(path.display().to_string().as_str()));
+        let hash_a = a.vision_prompt_sha256.clone().expect("hash present");
+
+        // Same config, different prompt CONTENT -> different provenance.
+        std::fs::write(&path, "a different chart prompt").unwrap();
+        let b = capture_info(&config);
+        assert_ne!(hash_a, b.vision_prompt_sha256.unwrap(), "content change must be visible");
     }
 }

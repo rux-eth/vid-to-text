@@ -124,6 +124,9 @@ ssh-desktop 'cd ~/vid-to-text && cargo run --release -p vtt-server'
 - `whisper.n_threads` — CPU threads for transcription (default 8)
 - `ollama.model` — vision model (recommended: `qwen3-vl:8b-instruct-q8_0`)
 - `ollama.num_ctx` — context window for multi-image requests (default 65536)
+- `ollama.prompt_template_path` — vision prompt file, relative to the server's working directory
+  (`prompts/vision.txt` general, `prompts/vision-chart.txt` for chart/screencast content; the
+  `market-research` profile selects the latter). Deploy with `config/deploy-prompts.sh`.
 - `vision.max_frames_per_request` — frames per Ollama batch (default 15)
 - `vision.fps` — frame candidate rate (default 2.0); in fixed mode every candidate is kept
 - `[vision.adaptive]` — `enabled` (default false), `scene_threshold`, `max_gap_secs`,

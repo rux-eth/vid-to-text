@@ -60,6 +60,19 @@ max_frames_per_chunk = 45
 # no sampling step, so a seed would be inert. (PR-020 Q7, Group D)
 temperature = 0.0
 
+# Content-specific vision prompt (PR-026). The shipped prompts/vision.txt was written
+# for TED talks and film clips: nine of its ten instructions presuppose humans, faces
+# and camera work, and 76% of this corpus's visual segments carried absent-human
+# boilerplate as a result. Instruction presupposition is a measured accuracy cost on
+# this model family -- Qwen2-VL-7B 78.49 -> 37.70 on CountBench, on a metric output
+# length cannot move, with the causal pathway isolated by attention-head ablation
+# (arXiv:2601.05201, ACL 2026). The chart prompt also states the interface conventions
+# that produced the hovered-candle fabrication.
+#
+# MUST stay inside [ollama]: a key placed after a nested table header belongs to that
+# table, which silently reverted two locked values once already (PR-022).
+prompt_template_path = "prompts/vision-chart.txt"
+
 [whisper]
 # Whisper paper Sec 4.5 prescribes beam-5 from temperature 0. Greedy is
 # documented to fall into repetition loops on long-form audio; the previously

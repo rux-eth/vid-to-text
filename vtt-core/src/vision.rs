@@ -396,6 +396,27 @@ pub fn check_context_budget(
     Ok(total)
 }
 
+/// Identifier and content hash of the vision prompt actually in force. (PR-026)
+///
+/// `CaptureInfo` records model, sampling and decoding parameters but recorded nothing
+/// about the prompt, so two captures made under different prompts were indistinguishable
+/// in the data. Editing `prompts/vision.txt` in place was therefore invisible -- the same
+/// defect class that stranded 36 corpus timelines in August 2026 for a different parameter.
+///
+/// The hash is over the template that `OllamaClient` actually loads, and is plain SHA-256
+/// of the file's bytes, so it equals `sha256sum` on either machine. Returns `None` for the
+/// hash when the template cannot be read; the job itself still fails at `OllamaClient::new`,
+/// which is where an unreadable path belongs.
+pub fn prompt_provenance(ollama: &OllamaConfig) -> (String, Option<String>) {
+    use sha2::{Digest, Sha256};
+    let (id, content) = match &ollama.prompt_template_path {
+        Some(p) if !p.is_empty() => (p.clone(), std::fs::read_to_string(p).ok()),
+        _ => ("(default_prompt)".to_string(), Some(ollama.default_prompt.clone())),
+    };
+    let hash = content.map(|c| format!("{:x}", Sha256::digest(c.as_bytes())));
+    (id, hash)
+}
+
 /// Load prompt template from file or return the default.
 fn load_prompt_template(path: &Option<String>, default_prompt: &str) -> Result<String, VttError> {
     match path {
@@ -748,6 +769,53 @@ mod tests {
 
         let result = load_prompt_template(&Some(path.display().to_string()), "unused default").unwrap();
         assert_eq!(result, "Custom prompt template");
+    }
+
+    /// PR-026: the timeline must say which prompt produced it. The hash is over the
+    /// template ACTUALLY used, and must equal `sha256sum` of the file so a timeline
+    /// can be compared directly against what is deployed on the GPU host.
+    #[test]
+    fn test_prompt_provenance_hashes_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision.txt");
+        std::fs::write(&path, "abc").unwrap();
+        let mut cfg = OllamaConfig::default();
+        cfg.prompt_template_path = Some(path.display().to_string());
+
+        let (id, hash) = prompt_provenance(&cfg);
+        assert_eq!(id, path.display().to_string());
+        // sha256("abc"), the value `sha256sum` prints for a file containing exactly `abc`.
+        assert_eq!(
+            hash.unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// With no path configured the built-in `default_prompt` is what runs, so that is
+    /// what gets hashed -- provenance must not go silently absent in that case.
+    #[test]
+    fn test_prompt_provenance_uses_default_prompt_when_no_path() {
+        let mut cfg = OllamaConfig::default();
+        cfg.prompt_template_path = None;
+        cfg.default_prompt = "abc".to_string();
+
+        let (id, hash) = prompt_provenance(&cfg);
+        assert_eq!(id, "(default_prompt)");
+        assert_eq!(
+            hash.unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// An unreadable path yields no hash rather than a wrong one. The job itself
+    /// still fails at `OllamaClient::new`, which is where a bad path belongs.
+    #[test]
+    fn test_prompt_provenance_unreadable_path_yields_no_hash() {
+        let mut cfg = OllamaConfig::default();
+        cfg.prompt_template_path = Some("/nonexistent/prompt.txt".to_string());
+        let (id, hash) = prompt_provenance(&cfg);
+        assert_eq!(id, "/nonexistent/prompt.txt");
+        assert!(hash.is_none());
     }
 
     #[test]

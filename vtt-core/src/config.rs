@@ -1490,6 +1490,12 @@ max_frames_per_chunk = 45
         assert_eq!(cfg.whisper.initial_prompt, "");
         assert_eq!(cfg.whisper.repetition_window_secs, 30.0);
         assert_eq!(cfg.ollama.temperature, 0.0);
+        // PR-026: the chart prompt, and it must have survived inside [ollama].
+        assert_eq!(
+            cfg.ollama.prompt_template_path.as_deref(),
+            Some("prompts/vision-chart.txt"),
+            "prompt_template_path must be under [ollama], not re-homed"
+        );
         // no key may have been re-homed under the adaptive table
         let adaptive = overrides["vision"]["adaptive"].as_table().unwrap();
         for k in adaptive.keys() {
@@ -1502,6 +1508,40 @@ max_frames_per_chunk = 45
     }
     // --- PR-023: fidelity config ---
 
+
+    /// PR-026: the prompt comparison is only interpretable if the prompt is the ONLY
+    /// difference between the two arms. Loads both repo profiles through the real merge
+    /// path and asserts they are identical once the prompt path is equalised -- so a
+    /// stray edit to one profile cannot silently confound the A/B.
+    #[test]
+    fn test_prompt_ab_profiles_differ_only_in_prompt() {
+        fn load(name: &str) -> ServerConfig {
+            let path = format!("{}/../config/profiles/{}.toml", env!("CARGO_MANIFEST_DIR"), name);
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let overrides: toml::Value = toml::from_str(&text).unwrap();
+            let mut base: toml::Value =
+                toml::from_str(&toml::to_string(&ServerConfig::default()).unwrap()).unwrap();
+            merge_toml(&mut base, &overrides);
+            base.try_into().unwrap()
+        }
+        let mut chart = load("market-research");
+        let mut base = load("exp-prompt-v0");
+
+        assert_eq!(chart.ollama.prompt_template_path.as_deref(), Some("prompts/vision-chart.txt"));
+        assert_eq!(base.ollama.prompt_template_path.as_deref(), Some("prompts/vision.txt"));
+
+        // Both prompts must actually exist in the repo; a typo would otherwise only
+        // surface as a failed job after the GPU is already busy.
+        for rel in ["prompts/vision-chart.txt", "prompts/vision.txt"] {
+            let p = format!("{}/../{}", env!("CARGO_MANIFEST_DIR"), rel);
+            assert!(std::path::Path::new(&p).exists(), "missing prompt file: {rel}");
+        }
+
+        // Equalise the one intended difference; everything else must match exactly.
+        chart.ollama.prompt_template_path = None;
+        base.ollama.prompt_template_path = None;
+        assert_eq!(chart, base, "the A/B profiles differ in something other than the prompt");
+    }
     #[test]
     fn test_fidelity_absent_means_disabled_and_table_parses() {
         let config: ServerConfig = toml::from_str("[vision]\nfps = 2.0\n").unwrap();

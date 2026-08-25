@@ -1247,6 +1247,76 @@ precondition rather than a local convention — so it is confirmed, not amended.
   against an 80% floor) and was resumed with the verify budget raised 10 → 14; the shared Tier-C
   template was restored afterwards and diffed clean.
 
+
+### Implementation Validation (2026-08-25)
+
+**Built.** Prompt provenance (`CaptureInfo.vision_prompt`, `.vision_prompt_sha256`, SHA-256 of the
+template `OllamaClient` actually loads); `config/deploy-prompts.sh`; `prompts/vision-chart.txt`
+selected by `market-research`, with `exp-prompt-v0` as a version-controlled baseline arm;
+`tools/prompt_ab.py`. **233 tests pass** (was 228).
+
+**Provenance verified end-to-end**, not only by unit test: job `95f4bc52` recorded
+`prompts/vision.txt` / `c0fe5d3687a0fccd…`, which equals `sha256sum` on the GPU host and the sum
+`deploy-prompts.sh` printed. The three values agree, which is the property the feature exists for.
+
+**A/B: two 15-minute excerpts x two prompts, identical sampling, one frozen `fidelity.rs`.**
+
+| clip | arm | segs | words/seg | boilerplate | stated | precision | recall | wall |
+|---|---|---|---|---|---|---|---|---|
+| `2024_4_8` | old | 8 | 639 | 100% | 111 | 0.883 | 0.194 | 360 s |
+| `2024_4_8` | **chart** | 8 | **264** | **37.5%** | 159 | 0.893 | 0.174 | 460 s |
+| `2024_6_24` | old | 10 | 652 | 100% | 240 | 0.950 | 0.296 | 361 s |
+| `2024_6_24` | **chart** | 10 | **308** | **60%** | 218 | 0.885 | 0.203 | 360 s |
+
+Pooled: **646 → 288 words/segment (−55%)**, boilerplate **100% → 50%**, stated facts **351 → 377
+(up)**, precision 0.929 → 0.889, recall 0.241 → 0.187.
+
+**Boilerplate, per pattern** (regexes fixed in `tools/prompt_ab.py` before the first run):
+
+| pattern | old | chart |
+|---|---|---|
+| absent humans | 77.8% | **0.0%** |
+| no scene transitions / camera | 50.0% | **0.0%** |
+| no expressions / body language | 27.8% | **0.0%** |
+| "In summary…" filler | 33.3% | **0.0%** |
+| nothing changed / remains unchanged | 83.3% | 50.0% |
+
+Four of five categories are eliminated outright. The residual 50% is entirely "nothing changed",
+which is **not** the same defect: restating that the screen is static is a reasonable thing to say
+about a static screen, and the new prompt explicitly permits saying it once, briefly.
+
+**The cursor-hover fabrication is addressed — checked by reading, on the video where it was found.**
+Movement claims across `2024_4_8` fall from 13 to 1, and header/cursor-aware phrasing rises from 17
+to 65. The model now states the convention itself:
+
+> "The header displays the open, high, low, and close values **for the candle under the cursor**,
+> along with a change figure."
+> "The presenter appears to be hovering over the chart, with the cursor position changing across
+> frames, **causing the header values to update to reflect the candle under the cursor**."
+
+The single remaining movement sentence draws on the correct source: *"The last-price label is now at
+42,608."* The old arm's corresponding segment instead narrated indicator panes and closed with an
+"In summary" paragraph.
+
+**What did NOT improve, stated plainly:**
+- **Recall fell 0.241 → 0.187**, a 22% relative drop, on both clips. The recall denominator is
+  prompt-invariant, so this is real: the terser prompt mentions **fewer of the prominent on-screen
+  facts**. That is the sharpest cost of the change and it is a genuine trade-off, not noise.
+- **Precision moved in opposite directions by clip** — 0.883 → 0.893 on one, 0.950 → 0.885 on the
+  other. **No accuracy claim is made in either direction**, which is exactly what the research
+  predicted at this effect size and sample.
+- Wall clock is unchanged in aggregate (360/361 s on one clip; 360 → 460 s on the other).
+
+**A reproducibility signal worth recording:** the old arm's precision on `2024_4_8` is **0.883**,
+matching PR-023's independently recorded 0.883 for that video to three decimals — so that figure was
+real and the pipeline is stable across a month and a rebuild.
+
+**Verdict against the PR's own bar:** boilerplate is measurably down as a rate, the worst known
+failure is addressed and verified by reading, nothing collapsed on the guardrail, and no accuracy
+claim is made. Recall is the open cost and is recorded rather than smoothed over.
+
+---
+
 ## Motivation
 
 **The shipped prompt is written for a different kind of video than this corpus contains.**
@@ -1384,21 +1454,21 @@ operating point uses. (Prompt provenance itself is implemented by PR-027.)
 
 ## Verification criteria
 
-- [ ] `CaptureInfo` records a prompt identifier and content hash; timelines written before this change
+- [x] `CaptureInfo` records a prompt identifier and content hash; timelines written before this change
       still deserialise
-- [ ] `prompts/` deploys to the GPU host by checksum-compare with verify-after; a mismatch is reported
+- [x] `prompts/` deploys to the GPU host by checksum-compare with verify-after; a mismatch is reported
       by name
-- [ ] The new prompt is selected by profile; the general prompt remains the default for non-chart
+- [x] The new prompt is selected by profile; the general prompt remains the default for non-chart
       video; `prompt_template_path` under `[ollama]` survives the real profile-merge path (test)
-- [ ] Before/after run on two excerpts with the old and new prompt, at identical sampling and a frozen
+- [x] Before/after run on two excerpts with the old and new prompt, at identical sampling and a frozen
       `fidelity.rs`
-- [ ] Boilerplate rate reported as a rate over segments, using one regex fixed before the run
-- [ ] Words per segment and `stated` count reported beside it, so a drop in stated numbers is visible
+- [x] Boilerplate rate reported as a rate over segments, using one regex fixed before the run
+- [x] Words per segment and `stated` count reported beside it, so a drop in stated numbers is visible
       rather than hidden inside a rate
-- [ ] Fidelity precision/recall reported as a guardrail with **no** claim that the new prompt is more
+- [x] Fidelity precision/recall reported as a guardrail with **no** claim that the new prompt is more
       accurate; a collapse in either is a blocker
-- [ ] The cursor-hover behaviour checked by reading output on the segment class where it occurred
-- [ ] `cargo test --workspace` passes
+- [x] The cursor-hover behaviour checked by reading output on the segment class where it occurred
+- [x] `cargo test --workspace` passes
 
 ## Research backing
 

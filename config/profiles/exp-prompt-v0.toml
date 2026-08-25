@@ -1,0 +1,40 @@
+# Baseline arm for the PR-026 prompt comparison: the locked market-research capture
+# config with the ORIGINAL prompt (prompts/vision.txt, the PR-015 CRISPE prompt).
+#
+# Exists so the "before" arm is reproducible from version control rather than from
+# whatever happened to be on the desktop. Every other value must match
+# market-research.toml exactly -- the prompt is the only variable.
+#
+# Usage: run this and `market-research` over the same clips, same server, same
+# fidelity.rs build. See prs/PR-026-content-specific-vision-prompt.md.
+
+[vision]
+fps = 2.0
+use_transcript = false
+transcript_window = "causal"
+
+[vision.adaptive]
+enabled = true
+scene_threshold = 0.08
+max_gap_secs = 15.0
+min_trigger_interval_secs = 2.0
+max_frames_per_chunk = 45
+
+[ollama]
+temperature = 0.0
+# The only difference from market-research.toml.
+prompt_template_path = "prompts/vision.txt"
+
+[whisper]
+beam_size = 5
+initial_prompt = ""
+entropy_thold = 2.4
+logprob_thold = -1.0
+no_speech_thold = 0.6
+temperature_inc = 0.2
+repetition_report_thold = 2.4
+repetition_window_secs = 30.0
+
+[fidelity]
+enabled = true
+recall_reference = "kept"

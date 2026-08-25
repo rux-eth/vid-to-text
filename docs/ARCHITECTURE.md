@@ -252,6 +252,7 @@ The operating point for market-research corpus capture. Every value below is res
 | `vision.use_transcript` | `false` | Audio-to-vision conditioning is the documented-harmful direction: language priors displace visual grounding. |
 | `vision.transcript_window` | `causal` | Enforces the Corpus Look-Ahead Freedom constraint. |
 | `ollama.temperature` | 0.0 | Removes sampling variance. |
+| `ollama.prompt_template_path` | `prompts/vision-chart.txt` | The general prompt presupposes humans, faces and camera work in nine of ten instructions; 76% of this corpus's visual segments carried absent-human boilerplate under it. Instruction presupposition is a measured accuracy cost on this model family (Qwen2-VL-7B 78.49 → 37.70 on CountBench, on a length-immune metric, causal pathway isolated by head ablation — arXiv:2601.05201, ACL 2026). The chart prompt also states the interface conventions behind the hovered-candle fabrication. |
 | `ffmpeg.chunk_duration_secs` | 180 | Retained. Its original stated rationale (a "768-frame cap") is unsupported — see `docs/0.0/DESIGN-log.md`. |
 | `vision.fps` | 2.0 (candidate rate) | Adaptive mode evaluates candidates at 2 fps — Qwen3-VL's native video fps — and keeps ~1 in 23. PR-022 design session; the 74-video sweep showed 88.9% of 2 fps candidates are visually unchanged. |
 | `vision.adaptive.enabled` | `true` | See **Frame Sampling**. Mechanism proven; benefit over uniform at equal budget on this content is best-guess-given-constraints (literature split, no scoring metric exists) — fixed mode remains one line away. |
@@ -267,6 +268,15 @@ The operating point for market-research corpus capture. Every value below is res
 |---|---|---|
 | `vision.max_frames_per_request` | 15 | Measured effect of raising it was -5.9% wall time, not statistically established. |
 | `whisper.model_path` | `large-v3-turbo` | Measured equal to `large-v3` on repetition and content retention, at 2.3x lower cost. |
+
+**Prompt provenance.** `CaptureInfo` records `vision_prompt` (the configured path, or
+`(default_prompt)`) and `vision_prompt_sha256` (SHA-256 of the template actually loaded, equal to
+`sha256sum` of the file). Without it a prompt edited in place was invisible in the data — the defect
+class that stranded 36 corpus timelines in August 2026 for a different parameter. Both fields are
+omitted when absent, so timelines written before PR-026 still load. `config/deploy-prompts.sh` puts
+`prompts/` on the server by checksum-compare and verifies after copying; the sums it prints are the
+same value the timeline records. The prompt is loaded in `OllamaClient::new`, which runs per job, so
+a deployed prompt takes effect on the next job without a restart.
 
 **Reproducibility, stated honestly.** `temperature = 0` removes sampling variance but does **not**
 deliver bit-identical output. Non-determinism at temperature 0 arises from batch-size dependence of
