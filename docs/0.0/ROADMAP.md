@@ -70,7 +70,8 @@ Full PR descriptions live in `prs/`. This file is the index.
 | [PR-022](../../prs/PR-022-content-adaptive-frame-sampling.md) | Content-adaptive frame sampling | `[x]` | PR-020 |
 | [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | Visual fidelity metric and sampling tune | `[x]` | PR-022 |
 | [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | OCR-grounded vision prompt | `[x]` | PR-022, PR-023 |
-| [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | Vision degeneration guard | `[ ]` | PR-023 |
+| [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | Vision degeneration guard | `[x]` | PR-023 |
+| [PR-026](../../prs/PR-026-content-specific-vision-prompt.md) | Content-specific vision prompt | `[ ]` | PR-022, PR-023, PR-025 |
 
 **Index note:** PR-009 never existed; PR-011..PR-015 are listed above without PR files;
 PR-016/PR-017 landed in git history but were never indexed. See
