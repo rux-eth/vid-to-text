@@ -71,7 +71,12 @@ Full PR descriptions live in `prs/`. This file is the index.
 | [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | Visual fidelity metric and sampling tune | `[x]` | PR-022 |
 | [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | OCR-grounded vision prompt | `[x]` | PR-022, PR-023 |
 | [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | Vision degeneration guard | `[x]` | PR-023 |
-| [PR-026](../../prs/PR-026-content-specific-vision-prompt.md) | Content-specific vision prompt | `[ ]` | PR-022, PR-023, PR-025 |
+| [PR-027](../../prs/PR-027-vision-measurement-readiness.md) | Vision measurement readiness (provenance, deploy, β, paired scoring, κ, chronology detector) | `[ ]` | PR-022, PR-023, PR-025 |
+| [PR-026](../../prs/PR-026-content-specific-vision-prompt.md) | Content-specific vision prompt | `[ ]` | **PR-027**, PR-022, PR-023, PR-025 |
+
+**Order note:** PR-027 carries a higher number than PR-026 but lands **before** it — order is
+expressed by the `Depends on` column, not by PR number. PR-026 was split on 2026-08-25 after its
+research round; the measurement half became PR-027 so neither half violates One PR, One Thing.
 
 **Index note:** PR-009 never existed; PR-011..PR-015 are listed above without PR files;
 PR-016/PR-017 landed in git history but were never indexed. See

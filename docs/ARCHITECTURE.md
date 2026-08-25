@@ -187,6 +187,27 @@ merge is forbidden by Segments Are Immutable After Merge):
   detector and rejected — it flags 12.5% of clean segments at 2.4 while still missing 3 of 18
   degenerate ones.
 
+**Comparing two arms.** Two runs of the same video at identical sampling are **segment-aligned by
+construction**: frame selection is pure ffmpeg and model-independent, so spans, per-segment frame
+lists and the recall denominator `prominent` are bit-identical, while `stated` is whatever the model
+said. Comparison is therefore *paired*, and `prominent` invariance holds only at a **fixed metric
+version** — a job predating PR-023's tokenizer fixes scores slightly different `prominent` counts, so
+arms must share one `fidelity.rs` build and config, or be re-scored with one binary.
+
+Two limits apply when the thing being compared is the **prompt** rather than the sampling:
+
+- **β is not neutral.** F0.5 weights precision double, so it retains a brevity reward: an arm at
+  precision 0.80 / recall 0.40 scores F0.5 0.667 against F1 0.533, while an arm at 0.60 / 0.60 scores
+  0.600 under both — a rank reversal produced by β alone, on exactly the trade a verbosity change
+  induces. F0.5 is the right default for a *sampling* comparison and the wrong one for a *verbosity*
+  comparison; published metrics built for length-differing outputs (OVFact, CAPTURE) use β = 1.
+- **Precision alone cannot rank length-differing arms**, because it has no term penalising omission —
+  the position of every metric paper surveyed, including the authors of the precision-only metrics.
+  Report precision with recall, and report `stated` count and mean segment length alongside: a score
+  difference accompanied by a large fact-count difference is uninterpretable, not a win.
+
+Sources and the full round: `prs/PR-026-content-specific-vision-prompt.md` § Research findings.
+
 **Review.** `vid-to-text review <results-dir>` renders a self-contained HTML sheet — thumbnails,
 description, judged facts — sampled disagreement-first (every fact the metric called unsupported or
 missed, then supported ones), and `--labels` scores the copied judgments: Cohen's κ between metric
