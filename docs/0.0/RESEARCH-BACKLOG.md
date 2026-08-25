@@ -59,7 +59,6 @@ Closing these gaps is **not** in PR-019's scope ("one PR, one thing"). It is a c
 | [PR-023](../../prs/PR-023-visual-fidelity-metric.md) | `design-research ✓` (session 2026-08-25: CHOCOLATE typology; OCR engine measured on corpus) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
 | [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | `design-research ✓` (Tier A 2026-08-25: OCR-augmented VQA, both directions) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
 | [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | `design-research ✓` (in-repo prior art + threshold measured over 2,423 segments) | `state-assessed 2026-08-25` | `implementation-cleared 2026-08-25` |
-| [PR-027](../../prs/PR-027-vision-measurement-readiness.md) | `design-research ✓` (inherited from PR-026's round, 2026-08-25: Tier-A + two Tier-C harness runs) | **Vision measurement readiness — NEXT UP.** Created by PR-026's Phase 4 Amend split. Fixes the instrument before the prompt is tuned with it: prompt provenance in `CaptureInfo`, a deploy path for `prompts/` (nothing deploys them today and the desktop checkout is unversioned), configurable F-score β (F0.5 pre-favours the terser arm — rank reversal demonstrated against the repo's own formula), per-video paired scoring (current code micro-averages, so the stopping rule has no variance estimate), the κ study `docs/ARCHITECTURE.md` already requires, and the cursor-hover chronology detector (verified buildable: `ocr.json` carries `x`/`y`/`height_px` and the header is the single topmost item). Still needs its own Phase 1 state assessment. |
 
 ## Tier 2 — Research-Pending
 
@@ -69,7 +68,7 @@ Closing these gaps is **not** in PR-019's scope ("one PR, one thing"). It is a c
 | [PR-020](../../prs/PR-020-market-research-capture-config.md) | **`implementation-cleared 2026-08-24`** — CLOSED | Complete through Phase 5.5. 8 must-answer questions: 5 at Tier A, 3 at Tier B. Group D run. Outcome Amend (5 amendments). Implementation reviewed, 2 defects found and fixed. **Phase 5.5: Confirm on all locked dimensions, ESCALATE on `vision.fps`** — ships unset behind a validation sentinel; mechanism escalated to PR-022. |
 | [PR-022](../../prs/PR-022-content-adaptive-frame-sampling.md) | `design-research ✓` (session 2026-08-24, Tier A + Tier C) · `state-assessed 2026-08-24` · `fully-researched 2026-08-24` · `implementation-cleared 2026-08-24` | Content-adaptive frame sampling. Design session complete: hybrid floor + trigger + cap, real PTS, token pre-flight, provenance, window-scored repetition. Residual uncertainty recorded: hybrid-vs-uniform quality on static screen content is unmeasured in the literature and unmeasurable here (no metric); fixed mode retained. **Approval gates waived by the user for this PR (2026-08-24).** |
 | [PR-021](../../prs/PR-021-vision-grounded-asr-correction.md) | `design-research ~` | Vision-grounded ASR correction — the documented-beneficial direction PR-020 surfaced. Partial basis from PR-020 Q3; needs its own full procedure. Follow-on to PR-020, not a prerequisite. |
-| [PR-026](../../prs/PR-026-content-specific-vision-prompt.md) | **`fully-researched 2026-08-25`** — gated on PR-027 | Content-specific vision prompt. Full Tier-2 path run: Phase 1, Phase 2 (Phase 6 parameters + tuning/held-out split fixed before any cycle), Phase 3 with **two Tier-C harness runs**, Phase 4 **Amend**. Group D waived by user direction. Settled: the presupposition problem is proven on Qwen2-VL (31–50 pp, ACL 2026, length-immune metrics, causal pathway isolated); the *removal* remedy is unmeasured anywhere and is labelled `best-guess-given-constraints`; prompt structure will not buy accuracy (PlotPick 1–3 pp; accuracy tracks legibility, converging with PR-024); primary measure locked (invented-number rate at 5% tolerance, joint with precision+recall at β=1, chronology reported separately). A Motivation error was corrected — the 94.1%/56.7% figures were two different metrics on two different subsets. |
+| [PR-026](../../prs/PR-026-content-specific-vision-prompt.md) | **`fully-researched 2026-08-25`** · **`implementation-cleared 2026-08-25`** | Content-specific vision prompt. Full Tier-2 path run: Phase 1, Phase 2 (Phase 6 parameters + tuning/held-out split fixed before any cycle), Phase 3 with **two Tier-C harness runs**, Phase 4 **Amend**. Group D waived by user direction. Settled: the presupposition problem is proven on Qwen2-VL (31–50 pp, ACL 2026, length-immune metrics, causal pathway isolated); the *removal* remedy is unmeasured anywhere and is labelled `best-guess-given-constraints`; prompt structure will not buy accuracy (PlotPick 1–3 pp; accuracy tracks legibility, converging with PR-024); primary measure locked (invented-number rate at 5% tolerance, joint with precision+recall at β=1, chronology reported separately). A Motivation error was corrected — the 94.1%/56.7% figures were two different metrics on two different subsets. |
 
 ### PR-018 non-conformance (recorded)
 
@@ -87,7 +86,7 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
 
 **Project staleness threshold:** 30 days (set in `docs/CONSTRAINTS.md` § Research Time-Decay).
 
-**Currently watching:** PR-026 (`fully-researched 2026-08-25`) — its implementation is gated on PR-027, so if PR-027 takes more than 30 days its Phase 1 must be re-run. PR-027 inherits PR-026's research but still owes its own Phase 1.
+**Currently watching:** none — PR-026 was researched and cleared the same day.
 
 ## Known documentation gaps
 
@@ -120,6 +119,16 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
 - **Hybrid-vs-uniform description quality on static screen content** cannot be measured with any
   metric found (PR-020 Phase 5.5 Finding 1; Tier C harness `wf_bef168b0-50b` caveats). Open until a
   reference-based evaluation exists.
+
+- **Two findings from the deleted PR-027, kept because they will otherwise be rediscovered.**
+  (1) `fidelity.json` already persists **per-segment** detail — `SegmentFidelity.stated` with
+  `supported: bool` and `.prominent` with `mentioned: bool` — so per-segment or per-video precision
+  and recall need **no change to `score_segments`**; only the summary micro-averages. Anyone wanting
+  variance estimates or paired comparison can compute them offline from files already on disk.
+  (2) The reason PR-023's κ calibration stalled is the **sheet**, not the code: `cohen_kappa` works and
+  `review --labels` scores a completed sheet, but `render_html` emits a table row per fact with three
+  radio buttons, and ~150 of those was rejected as unworkable. Any future calibration attempt has to
+  change the labelling interaction, not the sampling — which was already fixed once (PR-023 defect 5).
 
 - **PR-023's sampling study never ran and is owned by no PR.** Its manifest
   (`/home/rux/vtt-exp/study/runs/manifest.tsv`) holds **2 completed cells of the 21** the study

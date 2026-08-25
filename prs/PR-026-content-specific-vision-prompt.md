@@ -1224,15 +1224,19 @@ precondition rather than a local convention — so it is confirmed, not amended.
 - **User approved the updated spec: ✓ (2026-08-25)** — all six amendments (β → F1 for Phase 6, run the
   κ study, per-video paired scoring, primary measure locked, split the PR, permit a null accuracy
   result).
-- **Implementation of THIS PR: NOT cleared.** Gated on PR-027 landing. This is a deliberate outcome,
-  not an unfinished gate: Phase 6's stopping rule reads an estimator that does not exist yet, and its
-  primary measure is blind to the chronology defect until PR-027's detector exists. Tuning the prompt
-  before then would reproduce PR-015's mistake with more ceremony.
-- **Next action:** PR-027's own Phase 1 state assessment. It inherits this round's research but
-  touches code this round only surveyed (`fidelity.rs` scoring internals, `review.rs`, the deploy
-  scripts).
-- **Time-decay:** if PR-027 takes more than the project's 30-day staleness threshold, this PR's
-  Phase 1 re-runs before implementation. Recorded in `docs/0.0/RESEARCH-BACKLOG.md` § Drift Watch.
+- **Implementation: CLEARED (2026-08-25)**, against the collapsed scope above.
+- **Scope collapsed after the Gate Check, by user decision.** The gate first concluded that PR-027
+  had to land first, because Phase 6's stopping rule read an estimator that did not exist. The user
+  judged the measurement programme disproportionate to a prompt change and directed a collapse; PR-027
+  was deleted and Phase 6's statistical apparatus dropped with it. **The research supports the smaller
+  scope** — it found the accuracy goal that justified the apparatus is largely unreachable by
+  prompting — so this is a scope decision the findings back, not one they contradict.
+- **What the collapse costs is recorded in Scope**, per item, rather than being dropped silently. The
+  sharpest loss is that the cursor-hover fabrication is checked by reading instead of measured.
+- **The PR-015 hazard is handled differently, not ignored.** This PR no longer claims to have *tuned*
+  the prompt by measurement; it claims to have fixed a category error and checked that nothing
+  regressed. That is a weaker and more honest claim than the one the Phase 6 machinery was built to
+  support.
 
 **Procedure deviations in this round, recorded rather than omitted:**
 - **Group D waived** by user direction. Consequence carried into PR-027: the chronology detector and
@@ -1324,56 +1328,54 @@ corpus: the same defect class that stranded 36 timelines and was archived on 202
 
 ## Scope
 
-**Split 2026-08-25.** The research round grew this PR to six deliverables, which strains
-**One PR, One Thing**. The measurement half moved to **PR-027 (Vision measurement readiness)** —
-prompt provenance, prompt deployment, configurable F-score β, per-video paired scoring, the κ
-calibration study, and the cursor-hover chronology detector. The research argues for that ordering
-directly: a prompt cannot be tuned with an instrument that has not been shown to measure the right
-thing, and Phase 6's stopping rule needs the paired estimator and the detector to exist before
-cycle 1.
+**Collapsed 2026-08-25, after the research round and by user decision.** The round briefly grew this
+into two PRs and a measurement programme — a κ calibration study, a paired bootstrap, a configurable
+F-score β, a chronology detector. That was disproportionate to the task, and **the research itself is
+the argument against it**: prompt detail buys 1–3 pp of chart accuracy, and accuracy tracks
+*legibility* (~10 px header glyphs under one 32 px visual token), not prompting. The accuracy
+ambition is what required the apparatus, and the accuracy ambition was probably unreachable by prompt
+alone. PR-027 was deleted and the scope is now one PR.
 
-**In scope (this PR):**
-- **A chart/screencast vision prompt**, selected by the Phase 6 cycles. Directions, with what the
-  research says about each — these are arms to measure, not decisions already taken:
-  - *Removing the human/cinematography presuppositions* — the best-supported direction; add-side
-    effect proven on Qwen2-VL with an isolated causal pathway, removal itself unmeasured anywhere.
-  - *Making the prompt shorter* — supported by a second, independent mechanism: instruction tokens
-    take 38–60% of early-layer attention mass under elaborated prompts, and a neutral-text control
-    shows input elongation alone carries a measurable cost (arXiv:2605.28123).
-  - *Naming the content class explicitly.*
-  - *Describing the interface's conventions* (that the header reflects the hovered candle, that the
-    right edge is unfilled future space) — **now an empirical arm with no evidence behind it.** The
-    closest measured precedent supplies per-element labels for *action grounding*, not conventions
-    for description, and this project's own analogue (PR-024's OCR grounding) measured null.
-  - *Separating observation from inference structurally* rather than by instruction — a **legibility**
-    feature, not an accuracy fix. The shipped prompt already asks for the separation in words and the
-    `2024_4_8` fabrication was narrated as observation anyway.
-- **Per-content-class prompt selection.** The mechanism already exists — `ollama.prompt_template_path`
-  is a config key and profiles deep-merge over the base config — so this is to *use and pin*, not to
-  build. A prompt shipped as a **new profile** also makes `run-corpus.sh`'s existing profile-based
-  skip logic correct with no change, and makes PR-023's `study-023.sh` harness reusable for
-  (excerpt x prompt-arm) cycles. `prompt_template_path` must sit explicitly under `[ollama]` and be
-  pinned by a test loading the repo profile through the real merge path — PR-022 shipped a
-  table-re-homing defect this way once.
-- **Phase 6**, run under the parameters already fixed in Phase 2 and the primary measure locked below.
+**In scope:**
 
-**Explicitly out of scope:**
-- Everything in PR-027's scope, which lands first.
-- Changing sampling, whisper, or any PR-020/PR-022 locked dimension.
-- Re-opening `use_transcript` (measured worse, PR-024) or OCR grounding (measured null, PR-024).
-- Fine-tuning the model. Every cited mitigation for prompt-induced hallucination is model-side, and
-  that is a different project.
-- Running the corpus. This PR produces the prompt; the run is separate.
+1. **Prompt provenance** — a prompt identifier and content hash in `CaptureInfo`, so a timeline says
+   which prompt made it. Must be `Option`/`#[serde(default)]` so existing timelines still load. Kept
+   despite the collapse because without it the corpus becomes unattributable, which is the defect
+   class that stranded 36 timelines in August.
+2. **A deploy path for `prompts/`** — checksum-compare, `--apply`, verify-after, modelled on
+   `config/deploy-profiles.sh`. Kept because there is currently **no way to get a prompt onto the GPU
+   host reproducibly**: that script copies `*.toml` only and `~/vid-to-text` on the desktop is an
+   unversioned file copy.
+3. **The chart/screencast prompt itself**, shipped as a profile setting `ollama.prompt_template_path`
+   so the general prompt stays the default for non-chart video. The mechanism already exists;
+   `prompt_template_path` must sit explicitly under `[ollama]` and be pinned by a test through the
+   real merge path, because PR-022 shipped a table-re-homing defect this way once.
+   Directions, graded by what the research actually supports:
+   - *Remove the human/cinematography presuppositions* — best-supported. Add-side effect proven on
+     Qwen2-VL (78.49 → 37.70 on a length-immune metric, ACL 2026) with the causal pathway isolated by
+     attention-head ablation; removal itself unmeasured anywhere.
+   - *Make it shorter* — second lever, independent mechanism: instruction tokens take 38–60% of
+     early-layer attention mass, and a neutral-text control shows elongation alone has a cost.
+   - *Name the content class, and state the interface conventions* — including that the header shows
+     the **hovered** candle. No evidence either way; included because it is cheap and targets the
+     worst observed failure directly.
+4. **A before/after check on two excerpts**, reported honestly and without inventing statistics:
+   boilerplate rate (one fixed regex, stated before the run), words per segment, `stated` count, and
+   fidelity precision/recall as a **guardrail** — did anything collapse — **not** as an objective.
+   Plus reading the output.
 
-## Dependencies
-
-- **PR-027** — vision measurement readiness: prompt provenance, prompt deployment, configurable β,
-  per-video paired scoring, the κ study, and the chronology detector. **Must land first** — Phase 6's
-  stopping rule reads the paired estimator, and its primary measure is blind to the chronology defect
-  without the detector. Not yet landed.
-- **PR-022** — provenance and the adaptive sampler whose segment shape the prompt must suit. Landed `c37e8a1`.
-- **PR-023** — the fidelity diagnostic and `vid-to-text review`, which Phase 6 measures with. Landed `f570aec`.
-- **PR-025** — the degeneration guard, so prompt cycles are not confounded by enumeration collapse. Landed `f45ce72`.
+**Explicitly out of scope, with what each costs:**
+- **The κ calibration study.** Consequence: fidelity may not be used to *rank* prompt variants, per
+  `docs/ARCHITECTURE.md`. Using it as a regression guardrail is not ranking, so the rule is respected
+  rather than bent — but no claim of the form "prompt B is more accurate than prompt A" may be made.
+- **Paired bootstrap, configurable β, per-video scoring, the 6-cycle loop, the tuning/held-out split.**
+  Consequence: no statistical claim about accuracy. Per the research, that claim was likely not
+  available at this effect size anyway.
+- **The chronology detector.** Consequence: the cursor-hover fabrication is addressed in the prompt
+  and checked **by reading**, not measured. It may persist undetected. This is the sharpest thing
+  given up and is recorded as such.
+- Changing sampling, whisper, or any PR-020/PR-022 locked dimension; re-opening `use_transcript` or
+  OCR grounding; fine-tuning; running the full corpus.
 
 ## Architecture section implemented
 
@@ -1382,20 +1384,20 @@ operating point uses. (Prompt provenance itself is implemented by PR-027.)
 
 ## Verification criteria
 
-- [ ] The general prompt still applies to non-chart video; selection is explicit, not implicit, and
-      `prompt_template_path` under `[ollama]` survives the real profile-merge path (pinned by a test)
-- [ ] Phase 6 recorded: every cycle's prompt version and content hash, what changed, why, and the
-      measured result with its paired CI
-- [ ] The stopping rule, the tuning/held-out split, the cycle cap and the primary measure were fixed
-      before the first cycle and honoured; the held-out set was looked at no more than twice
-- [ ] The final prompt wins on the held-out set, not only on the tuning set — or the current prompt is
-      retained and that is reported as the result
-- [ ] Absent-human boilerplate is measurably reduced, reported as a rate over segments, using one
-      fixed tokenizer/regex stated before the first cycle
-- [ ] The cursor-hover chronology error is measured before and after with PR-027's detector
-- [ ] Every cycle reports `stated` count and mean segment length beside the score; a score difference
-      accompanied by a large fact-count difference is reported as uninterpretable, not as a win
-- [ ] `fidelity.rs` and its config were frozen across all arms, or every arm re-scored with one binary
+- [ ] `CaptureInfo` records a prompt identifier and content hash; timelines written before this change
+      still deserialise
+- [ ] `prompts/` deploys to the GPU host by checksum-compare with verify-after; a mismatch is reported
+      by name
+- [ ] The new prompt is selected by profile; the general prompt remains the default for non-chart
+      video; `prompt_template_path` under `[ollama]` survives the real profile-merge path (test)
+- [ ] Before/after run on two excerpts with the old and new prompt, at identical sampling and a frozen
+      `fidelity.rs`
+- [ ] Boilerplate rate reported as a rate over segments, using one regex fixed before the run
+- [ ] Words per segment and `stated` count reported beside it, so a drop in stated numbers is visible
+      rather than hidden inside a rate
+- [ ] Fidelity precision/recall reported as a guardrail with **no** claim that the new prompt is more
+      accurate; a collapse in either is a blocker
+- [ ] The cursor-hover behaviour checked by reading output on the segment class where it occurred
 - [ ] `cargo test --workspace` passes
 
 ## Research backing
