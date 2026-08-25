@@ -208,11 +208,21 @@ async fn load_persisted_results(
 
 /// Resolve an optional profile name to a ServerConfig.
 fn resolve_config(base: &ServerConfig, profile: &Option<String>) -> Result<ServerConfig, ApiError> {
-    match profile {
-        Some(name) => load_profile(base, name)
-            .map_err(|e| ApiError::BadRequest(e.to_string())),
-        None => Ok(base.clone()),
-    }
+    let resolved = match profile {
+        Some(name) => load_profile(base, name).map_err(|e| ApiError::BadRequest(e.to_string()))?,
+        None => base.clone(),
+    };
+
+    // Validate at SUBMISSION, not just at job start. A profile can carry a value
+    // that makes the config unrunnable -- notably the deliberately-unset
+    // `vision.fps = 0.0` sentinel. Without this the job is accepted, queued, and
+    // only then fails, which reads to the caller as a processing failure rather
+    // than a bad request. (PR-020 review)
+    resolved
+        .validate()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    Ok(resolved)
 }
 
 fn spawn_processing_task(state: Arc<AppState>, job_id: Uuid, video_path: PathBuf, force: bool, source_name: String, config: ServerConfig) {

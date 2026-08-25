@@ -627,6 +627,50 @@ separately.
 - Implementation cleared: **pending**
 
 
+### Implementation Review (2026-08-24)
+
+The implementation initially passed 18/18 self-written verification criteria. A subsequent
+independent read of the diff found **two defects the criteria did not cover**, both introduced by
+this PR. Recorded because self-checking against self-written criteria demonstrably did not catch them.
+
+**Defect 1 — the profile silently ran at fps 2.0.**
+The profile omitted `vision.fps` with a comment explaining it was pending Phase 5.5. But an absent
+TOML key falls through to the code default of **2.0**, so `--profile market-research` would have run a
+**~106-hour** corpus while the operator believed fps was unlocked. The PR's own scope claimed fps was
+"recorded as unlocked rather than quietly defaulted" — it was quietly defaulted. The comment
+documented intent; the code did the opposite.
+
+*Fix:* explicit `fps = 0.0` sentinel. `ServerConfig::validate()` rejects it with a message naming the
+deliberate-unset case, and `resolve_config` now validates at **submission**, so the request is refused
+with HTTP 400 rather than accepted and failed later. Verified end-to-end: sentinel profile -> 400 with
+the actionable message; a working profile -> 201.
+
+**Defect 2 — the repetition threshold is inherited from the wrong unit of analysis.**
+Q5's verification carried a qualification that was recorded and then not acted on: OpenAI computes
+`compression_ratio` over a whole **30-second decode window**, whereas this implementation scores each
+**segment** individually. Segments are shorter, compress worse, and score lower, so the inherited 2.4
+threshold is **conservative and under-flags**.
+
+Measured on `2024_2_12.mp4`:
+
+| transcript | segments | median CR | max CR | flagged at 2.4 |
+|---|---|---|---|---|
+| clean (greedy, no prompt) | 326 | 1.12 | 1.70 | 0 |
+| known-bad (greedy + prompt) | 52 | 1.34 | 8.18 | 1 (the real loop) |
+
+The egregious loop is caught with zero false positives, but 2.4 sits far above the clean ceiling of
+1.70 — a moderate loop scoring ~2.0 passes silently.
+
+*Fix:* **not** retuned. One video is not a calibration set, and ad-hoc tuning is what this PR exists to
+eliminate. The limitation is documented at the point of use (`whisper.rs` doc comment and the profile
+comment) and **added to Phase 5.5 scope** as a calibration item.
+
+**Added to Phase 5.5 scope by this review:**
+- Calibrate `repetition_report_thold` for per-segment scoring across multiple videos, or move to
+  per-window scoring to match the threshold's origin.
+- Decide `vision.fps` and replace the sentinel.
+
+
 ## Motivation
 
 The capture config governs what the corpus **is**. Every downstream use inherits it, and

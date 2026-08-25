@@ -247,6 +247,20 @@ pub struct RepetitionFlag {
 /// Visual segments are excluded: `vision::truncate_repetition` already guards them
 /// at generation time. Whisper output has no such guard, which is the asymmetry this
 /// closes. (PR-020 Q5, Group D)
+///
+/// # Known limitation: the threshold is inherited from a different unit of analysis
+///
+/// OpenAI Whisper computes `compression_ratio` over a whole **30-second decode
+/// window** and thresholds it at 2.4. This function scores each **segment**
+/// individually, and segments are shorter, so they compress worse and score lower.
+/// The 2.4 default is therefore **conservative here and will under-flag**: measured
+/// on one corpus video, 326 clean segments topped out at 1.70 while a genuine
+/// hallucinated loop scored 8.18. The egregious case is caught; a moderate loop
+/// scoring ~2.0 would pass silently.
+///
+/// The threshold is deliberately NOT retuned to that single video -- one video is not
+/// a calibration set, and ad-hoc tuning is what PR-020 exists to eliminate.
+/// Calibration is a PR-020 Phase 5.5 item.
 pub fn repetition_report(segments: &[Segment], threshold: f64) -> Vec<RepetitionFlag> {
     segments
         .iter()

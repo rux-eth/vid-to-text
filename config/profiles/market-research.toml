@@ -9,7 +9,16 @@
 # Operating point summary: docs/ARCHITECTURE.md -> ## Capture Configuration
 
 [vision]
-# fps is DELIBERATELY NOT SET HERE.
+# DELIBERATELY-UNSET SENTINEL. 0.0 fails config validation with an actionable
+# message, blocking the job BEFORE any GPU time is spent.
+#
+# Omitting the key instead would be worse than useless: an absent TOML key falls
+# through to the code default of 2.0, so a job would silently run a ~106-hour
+# corpus while the operator believed fps was unlocked. Set this explicitly when
+# Phase 5.5 decides it.
+fps = 0.0
+
+# Why it is unset:
 #
 # No published evidence measures frame sampling on static screencast content
 # (PR-020 Q2). The premise it was previously chosen on -- "uniform fps
@@ -62,4 +71,11 @@ temperature_inc = 0.2
 # Post-hoc repetition diagnostic. Flags; never edits. 2.4 matches OpenAI
 # Whisper's own compression_ratio_threshold. Known false positives: counting,
 # choruses, backchannel, litany all exceed it -- which is why it does not filter.
+#
+# KNOWN LIMITATION: 2.4 is calibrated by OpenAI over 30-SECOND DECODE WINDOWS.
+# This pipeline scores each SEGMENT individually; segments are shorter, compress
+# worse, and score lower, so 2.4 is conservative here and under-flags. Measured on
+# one corpus video: 326 clean segments peaked at 1.70, a genuine hallucinated loop
+# scored 8.18 -- the loop is caught, but a moderate one near 2.0 would pass.
+# Deliberately NOT retuned to a single video. Calibration is a Phase 5.5 item.
 repetition_report_thold = 2.4

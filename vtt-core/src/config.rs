@@ -444,7 +444,11 @@ impl ServerConfig {
         }
         if self.vision.fps <= 0.0 {
             return Err(VttError::Config(
-                "vision.fps must be greater than 0".into(),
+                "vision.fps must be greater than 0. If a profile set it to 0, that is the \
+                 deliberately-unset sentinel: no published evidence supports a sampling rate \
+                 for static screencast content, so the value is decided by PR-020 Phase 5.5 \
+                 measurement. Set vision.fps explicitly in the profile before running."
+                    .into(),
             ));
         }
         if self.vision.max_tokens == 0 {
@@ -910,6 +914,24 @@ listen_port = "not a number"
         let mut config = ServerConfig::default();
         config.ffmpeg.frame_format = "gif".to_string();
         assert!(config.validate().is_err());
+    }
+
+    /// A profile that deliberately leaves `fps` unset must FAIL, not silently fall
+    /// through to the code default. Omitting the key in TOML yields the default 2.0,
+    /// which would run a 106-hour corpus while the operator believes fps is unlocked.
+    /// The sentinel 0.0 makes the intent explicit and blocks the job at validation,
+    /// before any GPU time is spent. (PR-020 review)
+    #[test]
+    fn test_validation_rejects_deliberately_unset_fps_with_actionable_message() {
+        let mut config = ServerConfig::default();
+        config.vision.fps = 0.0;
+        let err = config.validate().expect_err("fps 0.0 must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("vision.fps"), "message must name the key: {msg}");
+        assert!(
+            msg.contains("deliberately unset") || msg.contains("Phase 5.5"),
+            "message must explain the deliberate-unset case, not just 'must be > 0': {msg}"
+        );
     }
 
     #[test]
