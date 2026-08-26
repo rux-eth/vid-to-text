@@ -1311,6 +1311,41 @@ The single remaining movement sentence draws on the correct source: *"The last-p
 matching PR-023's independently recorded 0.883 for that video to three decimals — so that figure was
 real and the pipeline is stable across a month and a rebuild.
 
+**Prompt iterations after the first A/B (2026-08-25), driven by the audio transcripts.** By user
+direction, the Whisper transcripts were mined as *design-time* evidence for what these sessions are
+about. `use_transcript` stays `false` — vision never sees audio at capture time — so this changes what
+the prompt says, not what the model is given.
+
+| version | sha | change | `2024_4_8` w/seg · prec · recall |
+|---|---|---|---|
+| v1 | `923b869a` | drop human/cinematography presuppositions, state interface conventions | 263 · 0.893 · 0.174 |
+| v2 | `a4a133fc` | + conditional feature list from 4.4k words of transcript | 278 · 0.926 · 0.235 |
+| v3 | `c0921846` | reweighted from 27k words across 8 videos | 543 · **0.529** · 0.330 |
+| **v3.1** | `cfab896e` | v3 with the enumeration trigger removed | **200** · 0.890 · **0.265** |
+
+**Why v1 lost recall, and how the transcripts found it.** v1's terseness discarded exactly what the
+analysts discuss: segments mentioning `support` fell 10/18 → 2/18, `resistance` 11/18 → 2/18,
+`momentum` 2/18 → 0/18 despite being the most-spoken indicator (11x). v2 added a *conditional* feature
+list — conditional because a checklist is itself a presupposition risk, the failure this PR exists to
+fix — and recovered recall on all three clips (.194→.235, .296→.320, .204→.286), including the
+held-out clip, with movement claims at zero on all three.
+
+**v3 regressed and the cause was mine.** Reweighting by a 27k-word vocabulary profile was sound, but
+the prompt handed the model a canned sentence template (`Say "a line is drawn at 71,700"`) for an
+enumerable feature. It filled the slot and ramped into negative prices. One segment stated 284 facts
+with 239 unsupported; excluding it the run scores 0.915. **v3.1 removes the template** — lines are
+listed as a set, gridline enumeration is forbidden, and an explicit rule names the ramp — and the
+worst segment falls to 64 stated / 3 unsupported.
+
+**That defect is now PR-028**, because neither shipped guard can see it: `truncate_numeric_run` counts
+a longest consecutive run of 2, and `truncate_repetition` sees only unique sentences.
+
+**Shipping decision is OPEN.** `prompts/vision-chart.txt` currently holds **v3.1**, validated on one
+clip. **v2 is the only version measured on all three**, including held-out. v3.1 is terser (200 vs 278
+w/seg) with higher recall (0.265 vs 0.235) and slightly lower precision (0.890 vs 0.926) on the clip
+both saw. Completing v3.1 on `2024_6_24` and `2025_05_26` is the outstanding task; if it does not hold,
+revert to v2 (`a4a133fc`) which is recorded and reproducible.
+
 **Verdict against the PR's own bar:** boilerplate is measurably down as a rate, the worst known
 failure is addressed and verified by reading, nothing collapsed on the guardrail, and no accuracy
 claim is made. Recall is the open cost and is recorded rather than smoothed over.

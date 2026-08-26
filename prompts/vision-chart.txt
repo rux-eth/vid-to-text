@@ -9,11 +9,44 @@ Instruction:
 4. Describe what CHANGES between frames — a new symbol, a timeframe switch, a drawn level, a scroll or zoom, a new pane, a switch to a slide or browser. If the screen is materially unchanged across several frames, say so once, briefly.
 5. Report what the presenter appears to be doing with the interface: hovering, drawing, scrolling, switching tabs.
 
+What to look for. These are the features the analysts in these recordings actually work with,
+ordered by how much of the discussion they carry (measured over 27,000 words of transcript from eight
+full episodes). Report them WHEN THEY ARE ON SCREEN — name them and read their values. This is a list
+of things to look for, NOT a list of things to assume are present: if one is not visible, say nothing
+about it at all. Never write that a feature is absent.
+- The visible price range: the top and bottom values of the price axis, and what span of dates the
+  x-axis covers. This is the single most-discussed thing in these sessions, so establish it early.
+  Give only the highest and lowest axis values — do NOT list the intermediate gridline labels.
+- Drawn boxes, shaded rectangles and highlighted bands, with the price at their upper and lower edges.
+  These mark zones and are discussed constantly. Report the geometry and the prices; do not name a box
+  "supply", "demand" or "resistance" unless the screen itself labels it that way.
+- Horizontal lines drawn on the chart, and the price each sits at. List them together as a set in one
+  sentence — "horizontal lines at 71,836, 69,400 and 38,720" — never one sentence per line. If there
+  are more than about eight, give the count and the highest and lowest instead of listing every one.
+  Report the price, not an interpretation: do not call a line "support" or "resistance" unless the
+  screen itself labels it.
+- The instrument and the timeframe as shown in the controls, and any change to either. Note that these
+  sessions work mostly on HIGH timeframes — weekly, monthly and yearly views are more common than
+  intraday — so read the timeframe control rather than assuming, and say whether the x-axis spans
+  days, months or years.
+- The instrument may be a crypto market-cap index rather than a single asset: headers reading
+  TOTAL, TOTAL2, TOTAL3 or "Crypto Total Market Cap" are common and should be reported by name.
+- Indicator panes below or overlaid on the chart — name the indicator as the screen labels it and read
+  its current value. Volume histograms and momentum-style oscillators are the common ones; keep this
+  to a clause, not a paragraph.
+- Any order or trade-setup box, and the fields it shows (entry, target, stop, size, risk/reward,
+  open P&L) with their values.
+- Which chart or tab is in focus if the presenter switches between several.
+
 Specification:
 - Report only what is rendered. If a value is too small or blurred to read, say it is unreadable rather than guessing a number.
 - State observations first. If you draw a conclusion from them, mark it plainly with "Inference:" so a reader can separate the two.
 - Do not describe what is absent. The screen has no people, faces, camera work, lighting or scene transitions, and saying so adds nothing — describe what IS there.
 - Do not summarise at the end. No "In summary" paragraph.
+- Never write a run of near-identical sentences that differ only by a number. If several values share
+  one description, compress them into a single sentence listing the values, or give a count and a
+  range. A descending or ascending series of round numbers is a sign you have started generating
+  rather than reading — stop and report only the values you can actually see.
 - Length should follow content. A frame batch showing one static chart needs two or three sentences; a batch spanning several symbol changes needs more.
 
 Interface conventions in these recordings — read carefully, these cause specific mistakes:
@@ -29,7 +62,8 @@ Parameters:
 - Your output is stored as one visual segment with a timestamp range.
 
 Examples:
-- Good: "A BTCUSD candlestick chart on the 1D timeframe, dark theme. The price axis on the right spans 58,000 to 72,000, with the last-price label at 69,412. A horizontal line is drawn at 71,700. The lower pane shows RSI at 47."
+- Good: "A BTCUSD candlestick chart on the 1D timeframe, dark theme. The price axis on the right spans 58,000 to 72,000, with the last-price label at 69,412. Horizontal lines are drawn at 71,700 and 65,400, and a shaded band covers roughly 60,000 to 62,500. The lower pane shows RSI at 47."
+- Bad (generated, not read): "A horizontal line is drawn at 29,000. A horizontal line is drawn at 28,000. A horizontal line is drawn at 27,000. ..." — one sentence per value, marching in round steps. Compress to a list, and only include values actually on screen.
 - Good (change): "Between the first and third frames the timeframe control switches from 1D to 4H and the visible range narrows to roughly two weeks; the drawn level at 71,700 remains."
 - Good (header, correctly attributed): "The header reads O71,708 H71,850 L69,365 C69,797 for the candle under the cursor."
 - Bad (the hovered-candle error): "The price moves from 71,708 to 71,850 and then falls to 69,365." Those are the open, high and low of ONE hovered candle, not a sequence of prices over time.
