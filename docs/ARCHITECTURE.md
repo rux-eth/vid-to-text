@@ -209,6 +209,15 @@ because masking is not length-preserving, the scan runs over the original text a
 offsets rather than masking the whole string and splitting that. A mask that swallowed the
 sentence-final period was measured collapsing one 275-sentence segment into 8.
 
+**Three guards are not a clean bill of health.** A live job on 2026-08-25 at this exact configuration
+produced two degenerate segments none of the three catch: one where a single word repeats inside the
+sentence ("a light light light ... light yellow line", 1,140 of 3,140 words), and one that is the
+templated ramp with a **word** slot ("near the end of April 2033" x215, the year marching 2024 -> 2033),
+which numeric masking cannot see. Across the same 11,108 segments, **423 carry a word repeated 5+ times
+consecutively and 93 carry one repeated 10+ times**. Any rate quoted for a guard is the rate of *its*
+mode as seen by *its* detector, never the rate of degeneration. Both modes are recorded in
+`docs/0.0/RESEARCH-BACKLOG.md`.
+
 **The fidelity diagnostic cannot verify that guard on all inputs.** It scores numbers and labels, so
 the circled-glyph case yields 25 scored facts from 144 fabricated sentences: removing 12,236
 characters of fabrication changed no fidelity number at all. Precision recovery verifies the numeric

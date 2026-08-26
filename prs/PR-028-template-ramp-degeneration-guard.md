@@ -508,7 +508,11 @@ segment (`37a3242c`, the `"You're not."` loop) predates the chart prompts entire
 36 timelines and, contrary to the note's expectation, contains **zero** instances of this mode; its
 manifest timestamps (2026-03-31) postdate `6f10acd` (2026-03-29), so it is guard-era for
 `truncate_repetition` purposes. All three degenerate segments are in the desktop pool. Corpus-wide rate:
-**3 in 11,108 (0.027%)**, or 2 in 11,108 (0.018%) counting only the templated mode.
+**3 in 11,108 (0.027%)**, or 2 in 11,108 (0.018%) counting only the templated mode. **Scope of that
+figure, corrected after the live run (2026-08-25):** it is the rate of *this mode*, detected by *this
+detector*. It is **not** the rate of vision degeneration, which is materially higher — a later sweep of
+the same 11,108 segments for consecutive repetition of a single word found **423 segments at >=5 and
+93 at >=10**, none of which this detector scores above 13. See § Notes.
 
 ### Group D: MCP Verification (2026-08-25)
 
@@ -607,7 +611,7 @@ nothing in this PR blocks on it, and fixing it carries its own calibration burde
 | order in the guard chain | third, after `truncate_repetition` and `truncate_numeric_run` | settled by construction in Phase 1 |
 | expected effect, case 1 | precision 0.529 -> 0.901, recall 0.330 -> 0.324 | offline `rescore` with the shipped scorer |
 | expected effect, case 2 | 15,905 -> 3,669 chars; fidelity unchanged | offline `rescore` with the shipped scorer |
-| corpus-wide rate | 3 in 11,108 (0.027%) | deduplicated sweep across all three pools |
+| corpus-wide rate **of this mode** | 3 in 11,108 (0.027%) | deduplicated sweep across all three pools; NOT the rate of degeneration generally |
 
 **Invented specifics removed:** the original § Scope's "numeric tokens masked" (wrong predicate) and its
 unspecified "threshold ... choosing a value in the gap" (the gap is real but is not what sets the value)
@@ -698,10 +702,52 @@ the legitimate 15-item yellow-line list happens to precede the ramp and survives
 would have been lost. Ordering the guard any other way would require deleting from the middle of model
 output, which is a larger change to what "faithful to model output" means than this PR should make.
 
-**Not claimed.** This guard was verified against stored timelines, not against a live job — the prompt
-that produced case 1 (v3, `c0921846`) is not deployed and PR-026's shipping decision is still open. The
-post-deployment invariant from Group D (no stored visual segment shows a skeleton repeat above the cap)
-has not yet been checked on a live run, because no live run has happened since.
+### Live Deployment (2026-08-25)
+
+Deployed to the RTX 4090 desktop and run end-to-end. Job `046cd326-5473-4c74-ae17-56afed903b2e`,
+`2024_6_24_5-20.mp4`, `market-research` profile, prompt `cfab896e` (v3.1), 459.7s, adaptive sampling
+at 16-20 frames per chunk.
+
+**The Group D post-deployment invariant is discharged.** Worst masked-skeleton repeat across the
+stored timeline's 10 visual segments is **9**, against the cap of 24 and the measured legitimate
+maximum of 13. All three guards are live: `truncate_repetition` fired 4x and `truncate_numeric_run`
+once (41 numbers at cap 40, cutting one batch 13,130 -> 479 chars). Whole-video precision 0.863,
+recall 0.351, F0.5 0.668.
+
+**Two degeneration modes this guard does NOT cover were found in that same run**, and they are the
+reason the rate figure above has been scoped rather than left standing:
+
+- **Mode 5 — intra-sentence word repetition.** Segment 6, 16,644 chars: *"The presenter draws a light
+  light light light light light light light light light light light light light light yellow line from
+  point ④ to point ③."* **1,140 of the segment's 3,140 words are the token `light`**, across 126
+  sentences. Every sentence is unique, no numeric run exists, and masking numbers does not collapse
+  the sentences (the repeat count differs), so all three guards are blind *by construction* — the
+  same structural argument this PR makes about the other two, now applied to it.
+- **Mode 6 — templated ramp with a WORD slot.** Segment 8, 13,701 chars: *"the presenter's cursor
+  moves to a point near the end of April 2033, and then to a point near the end of May 2033"* —
+  `near the end of` appears **215** times and the year marches **2024 -> 2033** on a 2024 video.
+  This is *this PR's own mode* with a non-numeric, non-glyph slot: `char::is_numeric()` cannot mask a
+  month name, so the skeletons differ and the count stays at 9. Widening the mask further is not the
+  answer (the vocabulary is unbounded); this needs a different detector.
+
+Both are under-counted by the fidelity diagnostic exactly as case 2 was — 16,644 chars yield 22 scored
+facts (precision 0.909) and 13,701 yield 28 (0.643) — which is further evidence for the follow-up
+already recorded in `docs/0.0/RESEARCH-BACKLOG.md`.
+
+**Mode 5 is systemic, not a one-off.** Re-sweeping the same 11,108 guard-era segments for the longest
+run of one word repeated consecutively: p50 **1**, p99 **8**, max **1,214**, with **423 segments at
+>=5** and **93 at >=10**; seven segments exceed 400. The p99-of-8 against a degenerate floor in the
+hundreds suggests a clean threshold, but setting it is its own research round.
+
+**What this does and does not say about PR-028.** The guard does what it was measured to do: it is
+installed in the right place, it fires on nothing legitimate, and the invariant holds. It does not
+make vision output trustworthy, and this run is direct evidence that two further modes remain live at
+the shipped configuration.
+
+**Not claimed.** The guard has still never been observed *firing* on a live job — this run produced no
+segment above the cap, so the live evidence is of correct non-intervention, not of correct
+intervention. Firing is evidenced only offline, against the two preserved jobs, because the prompt that
+produced case 1 (v3, `c0921846`) is not deployed and its file no longer exists in git or on the desktop.
 
 ---
 
@@ -874,7 +920,8 @@ this mode, and is unavailable through Ollama in any case.
   too.~~ **Checked in Phase 3: they do not.** The archive contributes 8,611 visual segments across 36
   timelines and contains **zero** instances; its manifest timestamps (2026-03-31) postdate `6f10acd`
   (2026-03-29), so it is guard-era for `truncate_repetition`. All three degenerate segments are in the
-  desktop pool. Corpus-wide rate: **3 in 11,108 (0.027%)**, or 2 counting only the templated mode.
+  desktop pool. Corpus-wide rate **of this mode**: **3 in 11,108 (0.027%)**, or 2 counting only the
+  templated mode. This is not the rate of vision degeneration — see the live-run findings below.
 - The fidelity diagnostic scoring 25 facts from 144 fabricated sentences is a defect in the
   **diagnostic**, not the guard. Recorded as a follow-up in `docs/0.0/RESEARCH-BACKLOG.md`; nothing in
   this PR blocks on it.

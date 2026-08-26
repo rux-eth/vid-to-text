@@ -151,6 +151,45 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   (`truncate_numeric_run`) for the consecutive-token form, and by **PR-028** for the templated and
   sub-threshold-verbatim forms.
 
+- **Vision degenerates in at least two further modes that no shipped guard covers.** Both found in a
+  single live job on 2026-08-25 (`046cd326-5473-4c74-ae17-56afed903b2e`, `2024_6_24_5-20.mp4`,
+  `market-research`, prompt v3.1 `cfab896e`) immediately after PR-028 was deployed — i.e. at the
+  current shipped configuration, not a historical one.
+
+  - **Mode 5 — intra-sentence word repetition.** Segment 6, 16,644 chars: "The presenter draws a
+    light light light light light light light light light light light light light light light yellow
+    line from point ④ to point ③." **1,140 of 3,140 words are the token `light`**, across 126
+    sentences. Blind spot is structural for all three guards: sentences are unique (so
+    `truncate_repetition` cannot see it), there is no numeric run (so `truncate_numeric_run` cannot),
+    and masking numbers does not collapse the sentences because the repeat count itself varies (so
+    `truncate_skeleton_repeat` scores it **1**).
+    **Sized across the corpus:** re-sweeping the same 11,108 guard-era visual segments for the longest
+    consecutive repeat of one word gives p50 **1**, p99 **8**, max **1,214**, with **423 segments at
+    >=5** and **93 at >=10**; seven exceed 400. A p99 of 8 against a degenerate floor in the hundreds
+    looks like a clean gap, but the threshold needs its own measured round — and note PR-028's
+    experience that the *tokenizer* decides the answer.
+
+  - **Mode 6 — templated ramp with a WORD slot.** Segment 8, 13,701 chars: "the presenter's cursor
+    moves to a point near the end of April 2033, and then to a point near the end of May 2033" —
+    `near the end of` x**215**, with the year marching **2024 -> 2033** on a 2024 video (fabricated
+    dates a decade out). This is **PR-028's own mode with a non-numeric slot**: `char::is_numeric()`
+    cannot mask a month name, so the skeletons differ and the count stays at 9, under the cap of 24.
+    Widening the mask is not the fix — the slot vocabulary is unbounded (months, colours, ordinals).
+    PR-028 measured a vocabulary-free alternative (one-hole grouping) and rejected it on
+    false-positive cost; that measurement should be revisited against these two cases, noting one-hole
+    scores mode 6 at **1** because *two* slots vary, so it would not catch it either.
+
+  Both are under-counted by fidelity exactly as PR-028's case 2 was (16,644 chars -> 22 scored facts;
+  13,701 -> 28), which compounds with the entry below. Not in PR-028's scope; that PR guards the
+  numeric/glyph-slotted mode and its verification criteria are met.
+
+- **Corpus degeneration rate was mis-scoped and is corrected here.** PR-028 reports "3 in 11,108
+  (0.027%)". That is the rate of **the templated-skeleton mode as measured by that detector**, not the
+  rate of vision degeneration, which is materially higher — 93 of the same segments carry a word
+  repeated 10+ times consecutively. Recorded because the 0.027% figure reads as reassurance about
+  output quality and is not evidence for it. Any future claim about corpus cleanliness must name the
+  mode and the detector that produced the number.
+
 - **The fidelity diagnostic is nearly blind to non-numeric fabrication.** `score_segments` extracts
   numbers and labels, so a visual segment carrying **144** fabricated trend-line sentences
   (`- A white line is drawn ... labeled "①"`, job `84149f3b`, segment 109, 15,905 chars) yielded only
