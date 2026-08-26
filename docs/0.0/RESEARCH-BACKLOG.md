@@ -168,6 +168,44 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   (`truncate_numeric_run`) for the consecutive-token form, and by **PR-028** for the templated and
   sub-threshold-verbatim forms.
 
+- **A visual segment can describe several DIFFERENT charts as though they were one — and the metric
+  cannot see it. Found 2026-08-26 by frame inspection; the most serious defect found so far.**
+  `4fdf172c` (v3.1, `2025_05_26`) segment 9 covers `00:14:00-00:15:00`, 11 frames. Extracting them from
+  the source shows the presenter changed charts at least twice inside that one segment:
+  - `14:00` — **Bitcoin / U.S. Dollar, 12h, BITSTAMP**, header `O109,881 H110,107 L109,514 C109,743`,
+    axis 98,200-121,000, levels labelled "Prev ATH", "Daily Level", "Feb Monthly open", "100k".
+  - `14:05` — a **maximized oscillator pane**, no price chart at all, axis 16-92, lines reading white
+    **52**, orange **50**, green **47**.
+  - `14:47` — **Crypto Total Market Cap Excluding Top 10, 1W, CRYPTOCAP**, header
+    `O268.05B H274.58B L264.43B C266.63B`, Fibonacci labels `0 (360.06B)`, `0.618 (180.67B)`,
+    `0.66 (168.48B)`.
+
+  The segment is described as **one** chart: *"A weekly candlestick chart of Crypto Total Market Cap
+  Excluding Top 10 … The lower pane displays three oscillating lines — white, green, and orange — with
+  values near 52, 50, and 47."* It takes the instrument from the third chart and the oscillator values
+  from the second, and drops the first entirely. **No chart at any instant looked like the one
+  described.**
+
+  **Precision scores it 0.750** and every conflated fact counts as supported, because `score_segments`
+  flattens `seen_facts` across *all* of a segment's frames (`fidelity.rs`) and checks each stated fact
+  against that union. Facts belonging to different charts therefore validate each other's segment. The
+  metric is structurally blind to composition errors: it can only ask "was this fact on screen at some
+  point in the window", never "were these facts on screen *together*".
+
+  **A second, separable error in the same segment:** the model reports `264.43B to 274.58B` as "the
+  visible price range". Those are the header's **L and H for the hovered candle**, not the axis span —
+  the on-screen Fibonacci labels reach 360.06B, so the real axis is far wider. This is the header-
+  misattribution class the v3.1 prompt explicitly warns about, surviving in a new form: the prompt
+  forbids reporting header values as *current price* but says nothing about using header H/L as the
+  *axis range*. It also explains why the same segment's lines at 293.06B / 327.16B / 367.71B looked
+  inconsistent with the stated range — the range was wrong, not the lines.
+
+  **Implications.** For a corpus meant to generate trading hypotheses, a timeline entry asserting a
+  chart state that never existed is worse than an omission. Candidate directions, none yet researched:
+  detect instrument changes between a segment's frames (the header text is OCR'd already, so a change
+  is cheaply detectable) and either split the segment or require the description to name the change;
+  and extend the prompt's header rules to cover the axis-range case. Needs its own PR.
+
 - **The vision model reports axis GRIDLINES as drawn levels — a prompt-fixable accuracy defect, found
   2026-08-26 by inspecting the frame.** On `2025_05_26` segment 0, v3.1 listed ~23 "lines drawn at"
   values. Checking the full-resolution frame (`ffmpeg -ss 25.5`, axis strip upscaled) shows the chart
