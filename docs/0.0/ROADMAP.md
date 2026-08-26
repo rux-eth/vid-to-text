@@ -84,21 +84,27 @@ that stand between the current state and being able to claim it.
 | # | PR | Description | Tier | Status | Depends on |
 |---|----|-------------|------|--------|------------|
 | 1 | [PR-029](../../prs/PR-029-fidelity-prices-non-numeric-fabrication.md) | Fidelity diagnostic prices non-numeric fabrication | Tier-2 | `[ ]` | PR-023, PR-028 |
-| 2 | [PR-030](../../prs/PR-030-close-vision-prompt-shipping-decision.md) | Close the vision-prompt shipping decision | Tier-1 | `[ ]` | PR-029, PR-032, PR-026 |
+| 2 | [PR-030](../../prs/PR-030-close-vision-prompt-shipping-decision.md) | Close the vision-prompt shipping decision (no ranking — see note) | Tier-1 | `[ ]` | PR-029, PR-032, PR-026 |
 | 3 | [PR-031](../../prs/PR-031-word-run-degeneration-guard.md) | Word-run degeneration guard | Tier-1 | `[ ]` | PR-029, PR-028 |
 | — | [PR-032](../../prs/PR-032-config-fidelity-for-job-submission.md) | Config fidelity for job submission | Tier-1 | `[ ]` | — |
 
 **Why this order.** PR-029 comes first because every quality figure the project has — including the
 whole PR-026 prompt table and any threshold PR-031 would set — was produced by a metric that cannot see
 majority-by-volume fabrication. On the 2026-08-25 live run, 70% of generated visual text sat in two
-degenerate segments and removing them moved precision by 1.6 points. Fixing the instrument before
+degenerate segments and removing them moved precision by 1.53 points. Fixing the instrument before
 reading it again is the only order that makes the later two answers trustworthy. Re-scoring existing
-arms is offline (`vid-to-text rescore`), so this costs no GPU time.
+arms is offline (`vtt-client rescore`), so this costs no GPU time.
 
 PR-032 is a prerequisite for PR-030 rather than a numbered step: a job can currently run under
 silently wrong configuration, which is how two runs were wasted on 2026-08-25. It can be dropped from
 the plan if the `curl` workaround is accepted instead, at the cost of that risk on every future
 capture.
+
+**PR-030 does not rank the prompt arms** (amended 2026-08-26, by user decision, on PR-029's Phase 1
+finding). `docs/ARCHITECTURE.md` § Review forbids using fidelity to tune until κ is reported, and κ is
+blocked on the review-sheet interaction. PR-030 therefore decides the prompt on the precision/recall
+trade and by reading the output, with fidelity as a guardrail only. Re-opening κ calibration was
+considered and rejected: it would resurrect the measurement programme deleted with PR-027.
 
 **Not in this plan, deliberately:** PR-021 (vision-grounded ASR correction) and PR-023's unowned
 sampling study. Both are real; neither blocks shipping.
