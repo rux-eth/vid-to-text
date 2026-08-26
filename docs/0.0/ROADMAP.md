@@ -106,6 +106,17 @@ blocked on the review-sheet interaction. PR-030 therefore decides the prompt on 
 trade and by reading the output, with fidelity as a guardrail only. Re-opening κ calibration was
 considered and rejected: it would resurrect the measurement programme deleted with PR-027.
 
+**Corpus capture launched 2026-08-26** under the `market-research` profile (v3.1 prompt, adaptive
+sampling), 68 videos / 41.2 hours / ~23 GPU-hours. The shipping bar and the reasoning are in
+`docs/VERSIONING.md` § Corpus-capture bar: the corpus depends on the **speech** track, which measured
+clean (full coverage, no loops, 128 wpm, repetition report silent), and the visual track's known
+silent defects are accepted and documented rather than fixed first. Source videos are retained, so
+the capture is re-derivable if the vision model or prompt improves.
+
+**Remaining visual-track work is post-capture, not pre-capture:** PR-031 (word-run guard), the
+gridline-vs-drawn-level prompt rule, the header-H/L-as-axis-range rule, and chart-change detection.
+All four are recorded in `docs/0.0/RESEARCH-BACKLOG.md`.
+
 **Not in this plan, deliberately:** PR-021 (vision-grounded ASR correction) and PR-023's unowned
 sampling study. Both are real; neither blocks shipping.
 

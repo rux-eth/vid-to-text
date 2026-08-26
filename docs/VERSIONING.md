@@ -20,6 +20,27 @@ Default: **ZeroVer pre-1.0** with a project-specific user-facing rule for choosi
 
 **v1.0 criteria:** [Project-specific — e.g. public-release milestone, API stabilization, paid-tier launch.]
 
+**Corpus-capture bar (distinct from a version cut), set 2026-08-26.** Capturing the corpus spends real
+GPU time and produces the research substrate, so it has its own criterion. There is no calibrated
+metric to threshold on — no κ has been reported, and the fidelity metric has documented blind spots —
+so the bar is **categorical, not numeric**. Sort every known defect by whether a downstream consumer
+can detect it:
+
+- **Silently misleading** — reads as correct, undetectable without the source frames. *Blocking for any
+  track the corpus relies on as data.*
+- **Incomplete** — omissions and guard truncations. Loses content without asserting falsehoods.
+  *Acceptable when recorded.*
+- **Self-announcing** — degeneration. Fools nobody who reads it, and the guards bound it.
+  *Acceptable.*
+
+**Capture when** every known defect sits in one of the three buckets with an explicit accept-or-fix
+decision recorded, and the blocking bucket is empty **for the track the data depends on**.
+
+Applied 2026-08-26: the corpus depends on the **speech** track, which is measured clean. The visual
+track's misleading defects are accepted and documented in `docs/ARCHITECTURE.md` § What the Output Is
+For, on the basis that it is supplementary context. Source videos are retained, so a capture is
+reversible.
+
 ## 2. Design-planning at every minor/major cut
 
 Every minor or major bump is treated as **starting a fresh project**. Before any implementation PR for the new version lands, run `PROCEDURE-design-planning.md` from Phase 1 — Idea / Decisions / Convergence / Docs — producing a fresh set of PR stubs for the new version's work.

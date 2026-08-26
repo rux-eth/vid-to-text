@@ -322,6 +322,47 @@ outside the per-batch retry loop, so a cancellation can never be mistaken for a 
 bound matters at high frame counts: a 360-frame chunk is 24 batches over ~13 minutes, and a cancelled
 job used to hold the GPU and block the queue for all of it.
 
+## What the Output Is For, and What to Trust
+
+**The speech transcript is the data. The visual track is context.** Decided 2026-08-26, and it governs
+how the rest of this document should be read: three generation-time guards, the fidelity diagnostic and
+its yield-concentration guardrail all measure the **visual** track, which is the supplementary one.
+
+**The transcript track is healthy** — measured on the 2026-08-26 `2025_05_26` capture: speech spans the
+full 0-900 s with **no gap over 3 s**, **zero** verbatim-repeated segments, longest consecutive word
+repeat 3, 128 wpm, and the whisper repetition report flagged nothing. Domain vocabulary lands correctly
+("hidden divergence", "range anchored VWAP", "daily block", "deep retrace"). `vision.use_transcript`
+is locked to `false`, so the visual track never contaminates the speech track.
+
+**The visual track carries known, silent defects.** They do not announce themselves — the text reads as
+fluent, specific and correct. Anything consuming `[VISUAL]` segments must treat them as *ambient
+context about what was on screen*, never as an authoritative record of chart state:
+
+- **Chart conflation.** A segment can describe several different charts as one. Measured 2026-08-26:
+  **41 of 119 segments (34%) span more than one (instrument, timeframe, exchange)** — 13 change
+  instrument, 28 change only the timeframe. In one verified case the description merged the instrument
+  from one chart with the indicator readings of another, producing a chart state that never existed.
+  The same segment indices are affected across every prompt arm, so this is a property of segmentation
+  (segments are cut per request batch), not of prompting.
+- **Omission.** The converse: a chart shown inside a segment can go unmentioned entirely, so the
+  timeline silently loses content the video showed.
+- **Gridlines reported as drawn levels.** The model lists axis gridline values among the levels the
+  analyst drew. Level *counts* from visual segments are therefore inflated, and a "drawn level" may be
+  a gridline.
+- **Header H/L reported as the visible price range.** The hovered candle's high and low are sometimes
+  stated as the axis span, which is far wider.
+- **Interface coverage is partial.** The prompt describes the TradingView convention. The corpus also
+  contains multi-pane derivatives dashboards (Velo) with no OHLC header, and quality there is
+  unmeasured.
+
+**Precision cannot see any of the above.** Conflated facts validate because `score_segments` checks
+each stated fact against the *union* of a segment's frames; gridline labels are genuinely on screen;
+omissions are not stated facts at all. A high fidelity score means "the numbers it stated were on
+screen at some point in this window" — never "this description is a true account of the screen".
+
+**The source videos are retained**, so any of this is re-derivable if the vision model or prompt
+improves; a capture is not a one-way door.
+
 ## Key Abstractions
 
 | Abstraction | Description |
