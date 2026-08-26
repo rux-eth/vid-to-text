@@ -168,6 +168,36 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   (`truncate_numeric_run`) for the consecutive-token form, and by **PR-028** for the templated and
   sub-threshold-verbatim forms.
 
+- **Corpus composition, checked by frame inspection 2026-08-26 — the corpus is homogeneous in genre
+  but NOT in interface, and the prompt is tuned for only one of the interfaces.** 68 videos, **41.2
+  hours**, one weekly market-analysis series. Frames sampled at 2023-10-02 t=30 and t=700, 2025-10-06
+  t=600, 2026-01-05 t=600, 2026-02-04 t=300 and t=900:
+  - **No talking-head, slide or intro content found at any sample point** — even 30 s into the earliest
+    episode it is already a chart. Genre generalisation from the three measured clips is therefore
+    reasonable.
+  - **Interface varies substantially.** TradingView single chart with drawn levels (the case the prompt
+    and every measurement assume); TradingView with dense Fibonacci *extension* tooling, a log axis and
+    fanning trendlines (2025-10-06); TradingView with a volume profile and signal arrows (2026-01-05);
+    and a **Velo multi-pane derivatives dashboard** — six stacked panes (funding rate, liquidations,
+    open interest, volume, Coinbase premium), each with its own header, no OHLC anywhere
+    (2026-02-04 t=900).
+  - **The same episode contains both TradingView and Velo** (2026-02-04 is TradingView at t=300 and
+    Velo at t=900). This is the chart-change finding above in its strongest form: not an instrument or
+    timeframe change but a **whole different tool with a different layout**, inside one video.
+  - **`prompts/vision-chart.txt` does not describe the Velo layout.** Its interface rules are written
+    around "the header line at the top left shows the instrument, timeframe, and O/H/L/C values" and
+    the hovered-candle convention. On a six-pane dashboard with no OHLC those rules are inapplicable,
+    and quality there is **entirely unmeasured** — no arm was ever run on such a section.
+  - **Resolution is mixed: 59 videos at 1920x1080, 9 at 1280x720** (`2023_10_2`, `2023_10_9`,
+    `2023_10_23`, `2023_11_6`, `2023_11_20`, `2023_11_27`, `2023_12_4`, `2025_07_21`, `2025_08_04`). Since accuracy tracks *legibility*
+    (PR-026: ~10 px header glyphs under one 32 px visual token), the 720p ninth of the corpus is a
+    known-harder population that no measurement covers either.
+
+  **Scope caution for any quality claim.** Every arm was measured on **minutes 5-20 of three 2024-2025
+  TradingView episodes**. That is a narrow slice of a 41-hour, interface-heterogeneous corpus, and the
+  PR-030 decision should be read as "best of four prompts on standard TradingView content", not as a
+  corpus-wide result.
+
 - **A visual segment can describe several DIFFERENT charts as though they were one — and the metric
   cannot see it. Found 2026-08-26 by frame inspection; the most serious defect found so far.**
   `4fdf172c` (v3.1, `2025_05_26`) segment 9 covers `00:14:00-00:15:00`, 11 frames. Extracting them from
