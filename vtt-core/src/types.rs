@@ -71,7 +71,7 @@ pub struct Timeline {
 }
 
 /// Corpus-level summary of the visual fidelity diagnostic. (PR-023)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct FidelitySummary {
     /// "kept" or "candidates" -- what recall was scored against.
     pub reference: String,
@@ -87,6 +87,38 @@ pub struct FidelitySummary {
     /// precision figure is then circular and is NOT evidence of accuracy.
     #[serde(default)]
     pub ocr_grounded: bool,
+    /// Comparability signature, in the sacreBLEU sense: two scores with an
+    /// identical signature are comparable, and two with different signatures are
+    /// not. Built inside `score_segments` -- a summary field set by a caller is
+    /// silently dropped on every `rescore`, which is how `ocr_grounded` was
+    /// lost. (PR-029)
+    #[serde(default)]
+    pub signature: String,
+    /// Total characters of visual text scored. Reported because a precision
+    /// figure next to a large volume difference is uninterpretable on its own.
+    #[serde(default)]
+    pub visual_chars: usize,
+    /// Median chars-per-stated-fact across visual segments.
+    #[serde(default)]
+    pub chars_per_fact_median: f64,
+    /// The same median, weighted by each segment's character count -- so it
+    /// lands where the *text* is rather than where the segments are.
+    #[serde(default)]
+    pub chars_per_fact_weighted: f64,
+    /// `chars_per_fact_weighted / chars_per_fact_median`: how concentrated a
+    /// job's text is in its lowest-yield segments. Prices fabricated bulk that
+    /// yields no checkable facts and is therefore invisible to `precision`.
+    /// Parameter-free and deliberately **without a threshold** -- a pointer for
+    /// a reader, never a classifier. ~1.0 means text is spread evenly across
+    /// segments of similar yield, including verbose-but-honest output; well
+    /// above 1.0 means most of the text sits in segments that state almost
+    /// nothing checkable. Being weighted by characters, it tracks *share of
+    /// text*, not segment count: a segment holding half the output sets the
+    /// weighted median however few segments there are, which is the property
+    /// the statistic is built on. Correspondingly it is least meaningful on
+    /// jobs with very few visual segments. (PR-029)
+    #[serde(default)]
+    pub yield_concentration: f64,
 }
 
 /// Frame-selection mode recorded in `CaptureInfo`.

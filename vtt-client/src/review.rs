@@ -308,7 +308,13 @@ pub fn run_rescore(
     if let Some(t) = tolerance { cfg.number_tolerance = t; }
     if let Some(m) = min_persist { cfg.min_persist_secs = m; }
     if let Some(h) = min_height { cfg.min_text_height_px = h; }
-    let report = vtt_core::score_segments(&timeline.segments, &kept, reference.as_deref(), &cfg);
+    let mut report = vtt_core::score_segments(&timeline.segments, &kept, reference.as_deref(), &cfg);
+    // score_segments cannot know whether the vision prompt was OCR-grounded, and a
+    // re-score that silently reported `false` would drop the circularity warning
+    // the original run recorded. Carry it forward from the stored timeline.
+    if let Some(prior) = timeline.fidelity.as_ref() {
+        report.summary.ocr_grounded = prior.ocr_grounded;
+    }
     println!("{}", serde_json::to_string_pretty(&report.summary).map_err(|e| e.to_string())?);
     if let Some(out) = write {
         std::fs::write(out, serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?)
@@ -364,7 +370,7 @@ mod tests {
         let n = |raw: &str| Fact::Number { value: 1.0, unit: vtt_core::NumberUnit::Plain, precision: 1.0, raw: raw.into() };
         let stated = |raw: &str, ok: bool| StatedFact { key: format!("n:{raw}"), fact: n(raw), supported: ok, matched: ok.then(|| raw.to_string()) };
         FidelityReport {
-            summary: FidelitySummary { reference: "kept".into(), segments: 2, stated: 4, supported: 2, prominent: 1, mentioned: 0, precision: 0.5, recall: 0.0, f05: 0.0, ocr_grounded: false },
+            summary: FidelitySummary { reference: "kept".into(), segments: 2, stated: 4, supported: 2, prominent: 1, mentioned: 0, precision: 0.5, recall: 0.0, f05: 0.0, ocr_grounded: false, ..Default::default() },
             number_tolerance: 0.0, min_persist_secs: 5.0, min_text_height_px: 10,
             segments: vec![
                 SegmentFidelity { start: "00:00:00.000".into(), end: "00:01:00.000".into(), frames: vec!["00:00:00.000".into()],

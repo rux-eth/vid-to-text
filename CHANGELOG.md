@@ -7,6 +7,16 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
 <!-- Add entries here as PRs land. At a version cut, rename to ## [x.y.z] - YYYY-MM-DD. -->
 
 ### Added
+- The fidelity diagnostic now reports **`yield_concentration`** — the text-weighted median
+  chars-per-stated-fact over the unweighted median — which prices fabricated bulk that states nothing
+  checkable and is therefore invisible to `precision`. Verbose-but-honest output scores ~1.0; text
+  piled into segments that state almost nothing scores well above it. Deliberately **without a
+  threshold**: it points a reader at a job, it never classifies one. Reported with `visual_chars`,
+  `chars_per_fact_median` and `chars_per_fact_weighted`, and gated by
+  `fidelity.min_facts_for_yield`. (PR-029)
+- **`FidelitySummary.signature`** — a sacreBLEU-style comparability string covering the metric version
+  and every scoring setting that can move a figure. Two reports with identical signatures are
+  comparable; two with different signatures are not. (PR-029)
 - Content-adaptive frame sampling (`[vision.adaptive]`): a uniform floor plus scene-change-triggered
   frames, de-clustered, with a per-chunk cap. Fixed-fps mode is unchanged and remains the default. (PR-022)
 - Visual segments now carry the real capture timestamps of their frames (`frames`), and the timeline
@@ -54,6 +64,11 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
   The mask uses `char::is_numeric()` rather than ASCII digits, because one observed case varied a
   circled-glyph slot (`①②③`) that ASCII masking cannot see. Thresholds measured over 11,108 visual
   segments: legitimate repeats top out at 13, degenerate ones are 143 and above. (PR-028)
+
+### Fixed
+- `vtt-client rescore` no longer drops `ocr_grounded`, which silently turned every re-scored
+  OCR-grounded run into one that appeared not to be — discarding the warning that its precision is
+  circular. (PR-029)
 
 ### Changed
 - OCR engine configuration moved from `[fidelity]` to its own `[ocr]` section, shared by the fidelity

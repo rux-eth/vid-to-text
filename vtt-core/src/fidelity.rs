@@ -497,6 +497,67 @@ fn ts_key(t: f64) -> String {
     format_timestamp(t)
 }
 
+/// Version of the scoring rules themselves. Bump whenever a change would move a
+/// figure that was already recorded, so old and new scores never compare silently.
+pub const FIDELITY_METRIC_VERSION: u32 = 1;
+
+fn median(sorted: &[f64]) -> f64 {
+    match sorted.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => sorted[n / 2],
+        n => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
+    }
+}
+
+/// Median of `vals` weighted by `wts`: the first value at which cumulative
+/// weight reaches half the total. With character counts as weights this lands
+/// where the *text* is, not where the segments are.
+fn weighted_median(pairs: &[(f64, f64)]) -> f64 {
+    if pairs.is_empty() {
+        return 0.0;
+    }
+    let total: f64 = pairs.iter().map(|(_, w)| *w).sum();
+    let mut acc = 0.0;
+    for (v, w) in pairs {
+        acc += *w;
+        if acc >= total / 2.0 {
+            return *v;
+        }
+    }
+    pairs[pairs.len() - 1].0
+}
+
+/// Order-independent digest of the stoplist, so two runs with different prose
+/// stoplists do not share a signature.
+fn stoplist_digest(stoplist: &[String]) -> u64 {
+    let mut acc: u64 = 0;
+    for w in stoplist {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in w.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        acc ^= h; // XOR: commutative, so declaration order cannot change it
+    }
+    acc
+}
+
+/// Comparability signature, after sacreBLEU (Post, WMT 2018): every setting that
+/// can move a score, in one string, built where the score is built. Two reports
+/// with identical signatures are comparable; different signatures are not.
+fn signature(config: &FidelityConfig, reference: &str) -> String {
+    format!(
+        "vtt-fidelity|v:{}|ref:{}|tol:{}|persist:{}|height:{}|stop:{}-{:x}",
+        FIDELITY_METRIC_VERSION,
+        reference,
+        config.number_tolerance,
+        config.min_persist_secs,
+        config.min_text_height_px,
+        config.label_stoplist.len(),
+        stoplist_digest(&config.label_stoplist),
+    )
+}
+
 /// Score every visual segment. `kept` must contain an OCR'd frame for each
 /// timestamp listed in the segments' `frames`; `reference` (optional) is the
 /// candidate-frame OCR for study mode. Pure apart from the inputs.
@@ -512,6 +573,8 @@ pub fn score_segments(
     let mode = if reference.is_some() { RecallReference::Candidates } else { RecallReference::Kept };
     let mut out = Vec::new();
     let (mut stated_n, mut supported_n, mut prominent_n, mut mentioned_n) = (0, 0, 0, 0);
+    let mut chars_total = 0usize;
+    let mut yield_pairs: Vec<(f64, f64)> = Vec::new();
 
     for seg in segments.iter().filter(|s| s.segment_type == SegmentType::Visual) {
         let start = parse_timestamp(&seg.start).unwrap_or(0.0);
@@ -574,6 +637,13 @@ pub fn score_segments(
             prominent.push(ReferenceFact { key, fact, mentioned, persist_secs: span.max(0.0), height_px: height });
         }
 
+        chars_total += seg.content.chars().count();
+        if stated.len() >= config.min_facts_for_yield.max(1) {
+            yield_pairs.push((
+                seg.content.chars().count() as f64 / stated.len() as f64,
+                seg.content.chars().count() as f64,
+            ));
+        }
         stated_n += stated.len();
         supported_n += stated.iter().filter(|s| s.supported).count();
         prominent_n += prominent.len();
@@ -589,12 +659,23 @@ pub fn score_segments(
 
     let precision = if stated_n > 0 { supported_n as f64 / stated_n as f64 } else { 0.0 };
     let recall = if prominent_n > 0 { mentioned_n as f64 / prominent_n as f64 } else { 0.0 };
+    // Yield concentration: how far the text-weighted median chars-per-fact sits
+    // above the plain median. Verbose-but-honest output raises both equally and
+    // scores ~1.0; text piled into segments that state nothing checkable raises
+    // only the weighted one.
+    yield_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let plain: Vec<f64> = yield_pairs.iter().map(|(v, _)| *v).collect();
+    let cpf_median = median(&plain);
+    let cpf_weighted = weighted_median(&yield_pairs);
+    let concentration = if cpf_median > 0.0 { cpf_weighted / cpf_median } else { 0.0 };
+    let reference_name = match mode {
+        RecallReference::Kept => "kept".to_string(),
+        RecallReference::Candidates => "candidates".to_string(),
+    };
+    let sig = signature(config, &reference_name);
     FidelityReport {
         summary: FidelitySummary {
-            reference: match mode {
-                RecallReference::Kept => "kept".to_string(),
-                RecallReference::Candidates => "candidates".to_string(),
-            },
+            reference: reference_name,
             segments: out.len(),
             stated: stated_n,
             supported: supported_n,
@@ -604,6 +685,11 @@ pub fn score_segments(
             recall,
             f05: f05(precision, recall),
             ocr_grounded: false,
+            signature: sig,
+            visual_chars: chars_total,
+            chars_per_fact_median: cpf_median,
+            chars_per_fact_weighted: cpf_weighted,
+            yield_concentration: concentration,
         },
         number_tolerance: config.number_tolerance,
         min_persist_secs: config.min_persist_secs,
@@ -782,6 +868,163 @@ mod tests {
             content: content.to_string(),
             frames: frames.iter().map(|t| format_timestamp(*t)).collect(),
         }
+    }
+
+    /// PR-029. Fabricated bulk that states nothing checkable is invisible to
+    /// precision by construction; the yield term is what makes it visible.
+    /// Both segments below state exactly the facts on screen -- precision is a
+    /// perfect 1.0 either way -- but one buries them in 20x the text.
+    #[test]
+    fn test_yield_concentration_sees_bulk_that_precision_cannot() {
+        let cfg = FidelityConfig::default();
+        let kept = vec![frame(0.0, &[("BTC", 16), ("42,000", 16)]), frame(15.0, &[("BTC", 16), ("42,000", 16)])];
+        let terse = "BTC trades at 42,000.";
+        let padded = format!("BTC trades at 42,000.{}", " The presenter draws a line from a point to a point.".repeat(20));
+        let lean = score_segments(
+            &[visual(0.0, 30.0, &[0.0, 15.0], terse), visual(30.0, 60.0, &[0.0, 15.0], terse)],
+            &kept, None, &cfg,
+        );
+        let bloated = score_segments(
+            &[visual(0.0, 30.0, &[0.0, 15.0], terse), visual(30.0, 60.0, &[0.0, 15.0], &padded)],
+            &kept, None, &cfg,
+        );
+        assert_eq!(lean.summary.precision, 1.0);
+        assert_eq!(bloated.summary.precision, 1.0, "precision cannot see the padding -- that is the whole premise");
+        assert_eq!(bloated.summary.stated, lean.summary.stated, "nor can the fact count");
+        assert!(
+            bloated.summary.yield_concentration > 1.5 && lean.summary.yield_concentration <= 1.05,
+            "the yield term must: lean={} bloated={}",
+            lean.summary.yield_concentration, bloated.summary.yield_concentration
+        );
+        assert!(bloated.summary.visual_chars > lean.summary.visual_chars);
+    }
+
+    /// PR-029. The trap this statistic exists to avoid: verbose-but-honest output
+    /// must NOT be flagged. Measured on the corpus, the general prompt has the
+    /// worst absolute chars-per-fact of any arm (310) and a concentration of 0.85,
+    /// because its text is spread evenly rather than piled into one dead segment.
+    /// A mean-based statistic fails this case; a concentration ratio does not.
+    #[test]
+    fn test_uniformly_verbose_output_is_not_flagged() {
+        let cfg = FidelityConfig::default();
+        let kept = vec![frame(0.0, &[("BTC", 16), ("42,000", 16)]), frame(15.0, &[("BTC", 16), ("42,000", 16)])];
+        let wordy = format!("BTC trades at 42,000.{}", " The chart is rendered on a dark background with a grid.".repeat(20));
+        let r = score_segments(
+            &[
+                visual(0.0, 30.0, &[0.0, 15.0], &wordy),
+                visual(30.0, 60.0, &[0.0, 15.0], &wordy),
+                visual(60.0, 90.0, &[0.0, 15.0], &wordy),
+            ],
+            &kept, None, &cfg,
+        );
+        assert!(r.summary.chars_per_fact_median > 300.0, "this arm IS verbose: {}", r.summary.chars_per_fact_median);
+        assert!(
+            r.summary.yield_concentration <= 1.05,
+            "uniform verbosity must not be flagged, got {}",
+            r.summary.yield_concentration
+        );
+    }
+
+    /// PR-029. What a *text-weighted* median is and is not robust to, pinned
+    /// because the distinction decides how the figure may be read.
+    ///
+    /// Not robust to share of text, deliberately: a segment holding half the
+    /// output IS the weighted median, however few segments there are. That is
+    /// the property the statistic is built on -- a segment that is most of the
+    /// text and states almost nothing is Mode B, and must score high.
+    ///
+    /// Robust to a minority outlier: the real case is `95f4bc52` vseg 5 -- 3
+    /// stated facts at 1,019 chars each, legitimate, and 9.4% of its job's text.
+    /// The measured arm scores 0.85, unflagged.
+    #[test]
+    fn test_yield_term_follows_text_share_not_segment_count() {
+        let cfg = FidelityConfig::default();
+        let kept = vec![frame(0.0, &[("BTC", 16), ("42,000", 16)]), frame(15.0, &[("BTC", 16), ("42,000", 16)])];
+        let terse = "BTC trades at 42,000.";
+        let low_yield = format!("BTC at 42,000 on 1D.{}", " Prose with no checkable content at all.".repeat(30));
+
+        // Minority outlier: the low-yield segment is a small share of the text.
+        let bulk: String = format!("BTC trades at 42,000.{}", " It moves up and it moves down and it rests.".repeat(30));
+        let minority = score_segments(
+            &[
+                visual(0.0, 30.0, &[0.0, 15.0], &bulk),
+                visual(30.0, 60.0, &[0.0, 15.0], &bulk),
+                visual(60.0, 90.0, &[0.0, 15.0], &bulk),
+                visual(90.0, 120.0, &[0.0, 15.0], &low_yield),
+            ],
+            &kept, None, &cfg,
+        );
+        assert!(
+            minority.summary.yield_concentration <= 1.05,
+            "a low-yield MINORITY of the text must not flag the job, got {}",
+            minority.summary.yield_concentration
+        );
+
+        // Dominant: the same segment, now holding nearly all the text.
+        let dominant = score_segments(
+            &[
+                visual(0.0, 30.0, &[0.0, 15.0], terse),
+                visual(30.0, 60.0, &[0.0, 15.0], terse),
+                visual(60.0, 90.0, &[0.0, 15.0], terse),
+                visual(90.0, 120.0, &[0.0, 15.0], &low_yield),
+            ],
+            &kept, None, &cfg,
+        );
+        assert!(
+            dominant.summary.yield_concentration > 5.0,
+            "a low-yield segment that IS most of the text must flag -- that is Mode B, got {}",
+            dominant.summary.yield_concentration
+        );
+
+        // The denominator gate is configurable, not hardcoded. Raising it drops
+        // sub-threshold segments from the statistic and keeps the rest...
+        let rich = "BTC at 42,000 on 1D from BITSTAMP with RSI at 55.";
+        let kept2 = vec![
+            frame(0.0, &[("BTC", 16), ("42,000", 16), ("1D", 14), ("BITSTAMP", 14), ("RSI", 14), ("55", 14)]),
+            frame(15.0, &[("BTC", 16), ("42,000", 16), ("1D", 14), ("BITSTAMP", 14), ("RSI", 14), ("55", 14)]),
+        ];
+        let gated = FidelityConfig { min_facts_for_yield: 4, ..Default::default() };
+        let r2 = score_segments(
+            &[visual(0.0, 30.0, &[0.0, 15.0], rich), visual(30.0, 60.0, &[0.0, 15.0], &low_yield)],
+            &kept2, None, &gated,
+        );
+        assert!(r2.summary.chars_per_fact_median > 0.0, "the qualifying segment still counts");
+        assert!(
+            r2.summary.chars_per_fact_median < 100.0,
+            "the sub-threshold segment was excluded, so the median is the rich segment's: {}",
+            r2.summary.chars_per_fact_median
+        );
+
+        // ...and when NO segment qualifies the statistic is empty rather than
+        // invented. A reader must be able to tell "not measured" from "1.0".
+        let none = score_segments(
+            &[visual(0.0, 30.0, &[0.0, 15.0], terse)],
+            &kept, None, &FidelityConfig { min_facts_for_yield: 99, ..Default::default() },
+        );
+        assert_eq!(none.summary.chars_per_fact_median, 0.0);
+        assert_eq!(none.summary.yield_concentration, 0.0, "no qualifying segment means no figure, not 1.0");
+    }
+
+    /// PR-029. Two scores are comparable only if their signatures match -- the
+    /// sacreBLEU rule. Every setting that can move a figure must change it.
+    #[test]
+    fn test_signature_changes_with_every_scoring_setting() {
+        let base = FidelityConfig::default();
+        let kept = vec![frame(0.0, &[("BTC", 16)])];
+        let segs = [visual(0.0, 30.0, &[0.0], "BTC at 42,000.")];
+        let sig = |c: &FidelityConfig| score_segments(&segs, &kept, None, c).summary.signature;
+        let b = sig(&base);
+        assert!(b.starts_with("vtt-fidelity|v:"), "{b}");
+        assert_eq!(b, sig(&base), "same settings must give the same signature");
+        assert_ne!(b, sig(&FidelityConfig { number_tolerance: 0.01, ..base.clone() }));
+        assert_ne!(b, sig(&FidelityConfig { min_persist_secs: 9.0, ..base.clone() }));
+        assert_ne!(b, sig(&FidelityConfig { min_text_height_px: 22, ..base.clone() }));
+        assert_ne!(b, sig(&FidelityConfig { label_stoplist: vec!["ZZZ".into()], ..base.clone() }));
+        // Stoplist order is not a setting; declaring the same words differently
+        // must not fork the signature and strand otherwise-comparable scores.
+        let a1 = FidelityConfig { label_stoplist: vec!["THE".into(), "US".into()], ..base.clone() };
+        let a2 = FidelityConfig { label_stoplist: vec!["US".into(), "THE".into()], ..base.clone() };
+        assert_eq!(sig(&a1), sig(&a2));
     }
 
     #[test]

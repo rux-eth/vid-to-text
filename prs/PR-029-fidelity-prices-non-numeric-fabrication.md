@@ -842,6 +842,61 @@ that chain now has no owner.** It does not block this PR, which ships without a 
 - **User approved updated spec: ✓ (2026-08-26)**
 - **Implementation cleared: ✓ (2026-08-26)**
 
+
+### Implementation Validation (2026-08-26)
+
+**Built and tested.** `yield_concentration` + `signature` on `FidelitySummary`, computed inside
+`score_segments`; `fidelity.min_facts_for_yield` (default 1) as the configurable denominator gate;
+`rescore` repaired to carry `ocr_grounded` forward. **245 tests pass** (`cargo test --workspace`), 4
+new.
+
+**The shipped Rust reproduces the research measurement exactly.** All 11 arms re-scored with the
+release binary:
+
+| arm | precision | concentration | predicted in Round 3 |
+|---|---|---|---|
+| v3.1 `2024_6_24` | 0.8627 | **10.17** | 10.17 |
+| v2 `2024_6_24` | 0.9065 | **2.37** | 2.37 |
+| general `2024_6_24` | 0.9500 | 1.14 | 1.14 |
+| general `2024_4_8` | 0.8829 | **0.85** | 0.85 |
+| *(seven further arms)* | — | 0.87–1.06 | 0.87–1.06 |
+
+Every precision figure is unchanged from its stored value, and **all 11 arms report one identical
+signature**: `vtt-fidelity|v:1|ref:kept|tol:0|persist:5|height:10|stop:19-6ff508cb79a3821a`.
+
+**Verification criteria, checked against the shipped binary:**
+
+- [x] Two arms with a confirmed degenerate segment above 2.0 (10.17, 2.37); all others below 1.2
+- [x] The verbose-but-honest general prompt on `2024_4_8` is **not** flagged (0.85), despite the worst
+      absolute chars-per-fact of any arm
+- [x] **Removing PR-028's 12,236 characters from `84149f3b` vseg 7 moves the statistic 2.37 → 1.50
+      while precision stays bit-identical at 0.9065** — run end-to-end, not simulated
+- [x] Low-fact segments cannot invent a ratio; the gate is config, and when nothing qualifies the
+      statistic is 0 rather than a fabricated 1.0
+- [x] The signature is emitted by `score_segments` and survives a `rescore` round-trip; a test asserts
+      every scoring setting changes it and that stoplist *order* does not
+- [x] All 11 arms re-scored under one signature; the 31 timelines without `ocr.json` remain
+      un-rescorable and are recorded as such
+- [x] `docs/ARCHITECTURE.md` § Fidelity Diagnostic updated **in this commit**, per PR-028's precedent
+- [x] `cargo test --workspace` passes
+
+**Two things the tests found that the research had wrong**, recorded rather than quietly fixed:
+
+1. **"A median cannot be moved by one outlier segment" was false.** The statistic is weighted by
+   *characters*: a segment holding half the output **is** the weighted median, however many segments
+   there are. That is the property the statistic depends on — a segment that is most of the text and
+   states almost nothing is exactly Mode B — but it means the figure tracks *share of text*, not
+   segment count, and is least meaningful on jobs with very few visual segments. The doc comment and
+   `ARCHITECTURE.md` state this; a test pins both directions (minority outlier → 1.0, dominant
+   low-yield segment → flagged).
+2. **Raising the gate can legitimately empty the statistic.** If no segment meets
+   `min_facts_for_yield`, there is no ratio. It reports 0, and a test asserts a reader can tell "not
+   measured" from "1.0".
+
+**Not claimed.** The separation still rests on **two** labelled positives. This is a pointer for a
+reader, not a classifier; nothing is auto-rejected on it, and no threshold may be added without the
+labels the κ calibration would supply.
+
 ---
 
 ## Motivation

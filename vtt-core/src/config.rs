@@ -235,6 +235,12 @@ pub struct FidelityConfig {
     /// Uppercase tokens that are prose, not on-screen labels ("US dollars",
     /// "THE chart"), excluded from fact extraction.
     pub label_stoplist: Vec<String>,
+    /// Minimum stated facts a segment needs before its chars-per-fact ratio
+    /// enters the yield-concentration statistic. A segment with almost no facts
+    /// divides by a near-zero denominator; the statistic is a median, so one
+    /// such segment cannot move it, but the gate is explicit and tunable.
+    /// (PR-029)
+    pub min_facts_for_yield: usize,
     /// Width of the kept-frame thumbnails stored with results.
     pub thumbnail_width: u32,
     /// JPEG quality (ffmpeg -q:v, 2 best .. 31 worst) for thumbnails.
@@ -253,6 +259,7 @@ impl Default for FidelityConfig {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            min_facts_for_yield: 1,
             thumbnail_width: 640,
             thumbnail_quality: 5,
         }

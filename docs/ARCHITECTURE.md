@@ -168,6 +168,39 @@ measurement on this corpus: 76/76 legible price-axis values recovered vs 42/76 w
 substitutions for tesseract 4.1.1 (`docs/0.0/DESIGN-log.md`, 2026-08-25). `/health` and `doctor`
 report it when the diagnostic is enabled in the server's base config.
 
+**Yield concentration, and what precision cannot see.** Precision scores the facts a segment states;
+it is silent about text that states nothing checkable. Measured on this corpus, that silence is the
+dominant failure: on the 2026-08-25 live run 70% of all generated visual text (30,345 of 43,411
+characters) sat in two degenerate segments, and removing both moved precision by 1.53 points — while
+PR-028's guard removing 12,236 fabricated characters from another job moved **no** fidelity number at
+all. `yield_concentration` prices that bulk: the **text-weighted median chars-per-stated-fact divided
+by the unweighted median**. Verbose-but-honest output raises both equally and scores ~1.0; text piled
+into segments that state almost nothing raises only the weighted one. Measured over the 11 prompt-A/B
+arms, the two carrying a confirmed degenerate segment score **10.17** and **2.37** while every other
+arm scores **0.85–1.14** — including the general prompt, which has the worst *absolute* chars-per-fact
+of any arm (310) and is not flagged, because its text is spread evenly. Being character-weighted it
+tracks share of text rather than segment count, so it is least meaningful on jobs with very few visual
+segments, and `fidelity.min_facts_for_yield` gates segments whose fact count is too small to give a
+meaningful ratio.
+
+**It is deliberately without a threshold.** The separation rests on two labelled positives, which is
+enough to point a reader at a job and not enough to classify one. Nothing is auto-rejected on it, and
+no threshold may be added without the human labels the κ calibration would supply. What was measured
+and **rejected** as the detector: `seq-rep-n` (Welleck et al., ICLR 2020), over 11,118 guard-era visual
+segments — 113 segments spread continuously through `[0.20, 0.75)` with no gap, and Pearson **+0.011**
+against OCR-verified precision; it flags a 0.960-precision segment and under-flags a 0.158-precision
+one, because repetition and fabrication are near-orthogonal on this corpus. Compression ratio was
+rejected earlier in PR-025, and that rejection extends to the whole redundancy family for this purpose.
+
+**Comparability signature.** `FidelitySummary.signature` records every setting that can move a score —
+metric version, recall reference, `number_tolerance`, `min_persist_secs`, `min_text_height_px` and a
+digest of `label_stoplist` — in one string, after sacreBLEU (Post, WMT 2018): *two reports with
+identical signatures are comparable; two with different signatures are not.* It is built inside
+`score_segments`, not by its caller, because a summary field set by a caller is silently dropped on
+re-score — which is exactly what happened to `ocr_grounded` (fixed alongside: `rescore` now carries the
+stored value forward). The stoplist digest is order-independent, so re-ordering the same words does not
+fork the signature.
+
 **Outputs.** `Timeline.fidelity` carries the summary (reference, counts, precision, recall, F0.5);
 `fidelity.json` beside the results carries per-segment detail; `frames/` beside the results holds
 thumbnails of every kept frame (`thumbnail_width`, `thumbnail_quality`) so the check and the review
