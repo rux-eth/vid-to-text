@@ -890,8 +890,20 @@ signature**: `vtt-fidelity|v:1|ref:kept|tol:0|persist:5|height:10|stop:19-6ff508
    `ARCHITECTURE.md` state this; a test pins both directions (minority outlier → 1.0, dominant
    low-yield segment → flagged).
 2. **Raising the gate can legitimately empty the statistic.** If no segment meets
-   `min_facts_for_yield`, there is no ratio. It reports 0, and a test asserts a reader can tell "not
-   measured" from "1.0".
+   `min_facts_for_yield`, there is no ratio.
+
+**Exposure of both, measured before deciding whether either needed a follow-up PR — neither does:**
+
+- Flag 1 affects **2 of 91** guard-era timelines. The median timeline has **107** visual segments and
+  p10 is 9; the two exceptions have exactly **1** segment each, where the plain and weighted medians
+  are the same number and the ratio is exactly 1.0 — uninformative rather than wrong. Treated as a
+  documented caveat.
+- Flag 2 has **zero occurrences**: 0 of 127 scored segments state zero facts, and no job would have
+  reported the empty case. **Fixed anyway, in this PR rather than a follow-up**, because a `0.0`
+  sentinel on a scale where higher is worse reads as the best possible score. `yield_concentration` is
+  now `Option<f64>` with `skip_serializing_if`, matching `Timeline.capture` and `Timeline.fidelity`;
+  a test asserts the key is **absent** from the JSON when nothing qualified. The 11 arms re-score
+  unchanged (10.17 / 2.37 / 0.85 …) after the change.
 
 **Not claimed.** The separation still rests on **two** labelled positives. This is a pointer for a
 reader, not a classifier; nothing is auto-rejected on it, and no threshold may be added without the

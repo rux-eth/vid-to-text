@@ -13,7 +13,8 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
   piled into segments that state almost nothing scores well above it. Deliberately **without a
   threshold**: it points a reader at a job, it never classifies one. Reported with `visual_chars`,
   `chars_per_fact_median` and `chars_per_fact_weighted`, and gated by
-  `fidelity.min_facts_for_yield`. (PR-029)
+  `fidelity.min_facts_for_yield`; omitted entirely when no segment qualifies, so "not measured" is
+  never mistaken for a perfect score. (PR-029)
 - **`FidelitySummary.signature`** — a sacreBLEU-style comparability string covering the metric version
   and every scoring setting that can move a figure. Two reports with identical signatures are
   comparable; two with different signatures are not. (PR-029)

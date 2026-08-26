@@ -667,7 +667,7 @@ pub fn score_segments(
     let plain: Vec<f64> = yield_pairs.iter().map(|(v, _)| *v).collect();
     let cpf_median = median(&plain);
     let cpf_weighted = weighted_median(&yield_pairs);
-    let concentration = if cpf_median > 0.0 { cpf_weighted / cpf_median } else { 0.0 };
+    let concentration = if cpf_median > 0.0 { Some(cpf_weighted / cpf_median) } else { None };
     let reference_name = match mode {
         RecallReference::Kept => "kept".to_string(),
         RecallReference::Candidates => "candidates".to_string(),
@@ -892,8 +892,9 @@ mod tests {
         assert_eq!(bloated.summary.precision, 1.0, "precision cannot see the padding -- that is the whole premise");
         assert_eq!(bloated.summary.stated, lean.summary.stated, "nor can the fact count");
         assert!(
-            bloated.summary.yield_concentration > 1.5 && lean.summary.yield_concentration <= 1.05,
-            "the yield term must: lean={} bloated={}",
+            bloated.summary.yield_concentration.unwrap() > 1.5
+                && lean.summary.yield_concentration.unwrap() <= 1.05,
+            "the yield term must: lean={:?} bloated={:?}",
             lean.summary.yield_concentration, bloated.summary.yield_concentration
         );
         assert!(bloated.summary.visual_chars > lean.summary.visual_chars);
@@ -919,8 +920,8 @@ mod tests {
         );
         assert!(r.summary.chars_per_fact_median > 300.0, "this arm IS verbose: {}", r.summary.chars_per_fact_median);
         assert!(
-            r.summary.yield_concentration <= 1.05,
-            "uniform verbosity must not be flagged, got {}",
+            r.summary.yield_concentration.unwrap() <= 1.05,
+            "uniform verbosity must not be flagged, got {:?}",
             r.summary.yield_concentration
         );
     }
@@ -955,8 +956,8 @@ mod tests {
             &kept, None, &cfg,
         );
         assert!(
-            minority.summary.yield_concentration <= 1.05,
-            "a low-yield MINORITY of the text must not flag the job, got {}",
+            minority.summary.yield_concentration.unwrap() <= 1.05,
+            "a low-yield MINORITY of the text must not flag the job, got {:?}",
             minority.summary.yield_concentration
         );
 
@@ -971,8 +972,8 @@ mod tests {
             &kept, None, &cfg,
         );
         assert!(
-            dominant.summary.yield_concentration > 5.0,
-            "a low-yield segment that IS most of the text must flag -- that is Mode B, got {}",
+            dominant.summary.yield_concentration.unwrap() > 5.0,
+            "a low-yield segment that IS most of the text must flag -- that is Mode B, got {:?}",
             dominant.summary.yield_concentration
         );
 
@@ -1002,7 +1003,12 @@ mod tests {
             &kept, None, &FidelityConfig { min_facts_for_yield: 99, ..Default::default() },
         );
         assert_eq!(none.summary.chars_per_fact_median, 0.0);
-        assert_eq!(none.summary.yield_concentration, 0.0, "no qualifying segment means no figure, not 1.0");
+        assert_eq!(
+            none.summary.yield_concentration, None,
+            "no qualifying segment means NO figure -- not 0.0, which reads as the best possible score"
+        );
+        let json = serde_json::to_string(&none.summary).unwrap();
+        assert!(!json.contains("yield_concentration"), "unmeasured must be omitted, not serialised: {json}");
     }
 
     /// PR-029. Two scores are comparable only if their signatures match -- the

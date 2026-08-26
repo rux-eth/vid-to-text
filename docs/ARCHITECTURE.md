@@ -181,7 +181,9 @@ arm scores **0.85–1.14** — including the general prompt, which has the worst
 of any arm (310) and is not flagged, because its text is spread evenly. Being character-weighted it
 tracks share of text rather than segment count, so it is least meaningful on jobs with very few visual
 segments, and `fidelity.min_facts_for_yield` gates segments whose fact count is too small to give a
-meaningful ratio.
+meaningful ratio. When no segment qualifies, the field is **omitted** rather than reported as zero: on
+a scale where higher is worse, a `0.0` sentinel reads as the best possible score instead of as "not
+measured".
 
 **It is deliberately without a threshold.** The separation rests on two labelled positives, which is
 enough to point a reader at a job and not enough to classify one. Nothing is auto-rejected on it, and

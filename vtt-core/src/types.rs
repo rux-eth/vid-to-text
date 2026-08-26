@@ -116,9 +116,14 @@ pub struct FidelitySummary {
     /// text*, not segment count: a segment holding half the output sets the
     /// weighted median however few segments there are, which is the property
     /// the statistic is built on. Correspondingly it is least meaningful on
-    /// jobs with very few visual segments. (PR-029)
-    #[serde(default)]
-    pub yield_concentration: f64,
+    /// jobs with very few visual segments.
+    ///
+    /// `None` when no segment met `fidelity.min_facts_for_yield` and there is
+    /// nothing to report -- omitted from the JSON rather than serialised as a
+    /// number, because on a scale where higher is worse a `0.0` sentinel reads
+    /// as the best possible score instead of as "not measured". (PR-029)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_concentration: Option<f64>,
 }
 
 /// Frame-selection mode recorded in `CaptureInfo`.
