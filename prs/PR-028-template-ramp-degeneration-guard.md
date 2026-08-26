@@ -642,6 +642,67 @@ are both replaced with the measured details above.
 4. Expect case 2's fidelity numbers to be **identical** before and after truncation. That is the
    measured, correct outcome — not evidence the guard failed.
 
+### Implementation Validation (2026-08-25)
+
+`truncate_skeleton_repeat` runs third at generation time, after `truncate_repetition` and
+`truncate_numeric_run`, and logs every cut. **241 tests pass** (baseline 233 + 8 new), including one
+that feeds the function the reproducing segment's shape verbatim and one that pins the new char-based
+tokenizer against `truncate_numeric_run`'s byte-based one on ASCII input, so the two cannot drift.
+
+**Verified with the shipped Rust guard, not the research model.** Both preserved jobs were re-scored
+offline with the release `vtt-client`; the research figures were reproduced to the digit:
+
+| | stated | supported | precision | recall | F0.5 |
+|---|---|---|---|---|---|
+| case 1 (`2fc10c93` seg 6) before | 556 | 294 | **0.5288** | 0.3301 | 0.4720 |
+| case 1 after | 313 | 282 | **0.9010** | 0.3240 | 0.6644 |
+| case 2 (`84149f3b` seg 7) before | 310 | 281 | **0.90645** | 0.32006 | 0.66337 |
+| case 2 after | 310 | 281 | **0.90645** | 0.32006 | 0.66337 |
+
+Log lines: `[vision] batch N repeated one sentence skeleton 267 times (cap 24), truncated from 11323
+to 1778 chars` and `... 143 times (cap 24), truncated from 16381 to 3719 chars`.
+
+- **Case 1 recovers to 0.901** against the 0.915 the rest of that run scores. Supported facts fall only
+  294 -> 282 and recall only 0.330 -> 0.324: the guard removes fabricated residue and leaves real
+  content nearly untouched, the same shape PR-025 measured.
+- **Case 2 is unchanged in every fidelity number** — the predicted, correct outcome. 12,662 bytes of
+  fabricated trend-line claims removed, and the metric that exists to catch fabrication did not move.
+  This is why criterion 1b is phrased in characters and reading rather than precision.
+- Case 2's byte counts (16,381 -> 3,719) exceed the research round's character counts (15,905 ->
+  3,669) because the guard logs `str::len()` in bytes and the circled glyphs are 3-byte UTF-8. Same
+  behaviour, different unit; consistent with `truncate_numeric_run`'s existing log.
+
+**Corpus-wide false-positive check, re-run with the Rust implementation** over the same 11,108
+guard-era visual segments (94 timelines, deduplicated, 4 pre-guard timelines excluded by the Phase-1
+`>=3 verbatim repeats` marker):
+
+| setting | segments truncated | which |
+|---|---|---|
+| `max_skeleton_repeat = 24`, `min_skeleton_chars = 10` (defaults) | **3** (0.027%) | 878, 267, 143 |
+| `max_skeleton_repeat = 24`, `min_skeleton_chars = 15` | 2 (0.018%) | 267, 143 |
+| `max_skeleton_repeat = 0` | 0 | guard disabled corpus-wide |
+
+The Rust guard reproduces the research measurement exactly, including the third case that
+`min_skeleton_chars = 10` exists to catch. No legitimate segment is touched at any setting.
+
+**Residue, stated honestly.** Cap 24 keeps 24 occurrences, so the reproducing segment still carries
+**4** fabricated ramp values (29,000 / 28,000 / 27,000 / 26,000) instead of 247, and case 2 still
+carries 24 fabricated trend-line claims instead of 143. A lower cap would remove more residue at the
+cost of the OCR-supported head, which ends at position 20. The cap is set for the head-preservation
+side of that trade, and the log line records every cut.
+
+**A known property, not a defect.** The cut discards everything after the (cap+1)-th occurrence,
+including any legitimate prose that follows the repeated block — the same behaviour
+`truncate_repetition` (which breaks) and `truncate_numeric_run` (which cuts) already have. In case 2
+the legitimate 15-item yellow-line list happens to precede the ramp and survives; had it followed, it
+would have been lost. Ordering the guard any other way would require deleting from the middle of model
+output, which is a larger change to what "faithful to model output" means than this PR should make.
+
+**Not claimed.** This guard was verified against stored timelines, not against a live job — the prompt
+that produced case 1 (v3, `c0921846`) is not deployed and PR-026's shipping decision is still open. The
+post-deployment invariant from Group D (no stored visual segment shows a skeleton repeat above the cap)
+has not yet been checked on a live run, because no live run has happened since.
+
 ---
 
 ## Motivation
@@ -755,32 +816,32 @@ Criterion 1 is split because research proved it is **not** applicable to all thr
 metric cannot see the non-numeric variant, so demanding a precision recovery there would be demanding
 evidence the diagnostic cannot produce.
 
-- [ ] **1a — numeric variant.** Job `2fc10c93`, segment 106 is truncated and whole-video precision
+- [x] **1a — numeric variant.** Job `2fc10c93`, segment 106 is truncated and whole-video precision
       recovers toward the 0.915 the rest of that run scores. *Research measured **0.529 -> 0.901** at
       cap 24 via offline `rescore`; the implementation must reproduce it.*
-- [ ] **1b — non-numeric variant.** Job `84149f3b`, segment 109 is truncated. Verified by
+- [x] **1b — non-numeric variant.** Job `84149f3b`, segment 109 is truncated. Verified by
       **characters and claims removed and by reading**, not by precision: research measured 15,905 ->
       3,669 chars and 143 -> 25 white-line claims, with the legitimate 15-item yellow-line list intact
       and **every fidelity number unchanged**. That last fact is recorded as evidence, not treated as a
       failure.
-- [ ] **1c — sub-threshold verbatim variant.** Job `37a3242c`, segment 130 (`"You're not."` x878) is
+- [x] **1c — sub-threshold verbatim variant.** Job `37a3242c`, segment 130 (`"You're not."` x878) is
       truncated at the cap.
-- [ ] Skeleton extraction masks numeric tokens with `char::is_numeric()` and is pinned by tests,
+- [x] Skeleton extraction masks numeric tokens with `char::is_numeric()` and is pinned by tests,
       including a percentage, a suffixed value and a non-ASCII numeric slot (`1.738T`, `-0.70%`, `①`)
-- [ ] Sentence splitting does not split inside a decimal (`1.738`), pinned by a test
+- [x] Sentence splitting does not split inside a decimal (`1.738`), pinned by a test
 - [x] Threshold measured over every visual segment on disk, with the separation recorded and the
       tokenizer stated explicitly — **done in Phase 3**: 11,108 guard-era segments (94 timelines,
       deduplicated, 4 pre-guard timelines excluded); legitimate max **13**, degenerate **143 / 267 /
       878**; tokenizer = `number_end` with `char::is_numeric()`
-- [ ] A legitimate list of drawn levels survives intact — specifically, **all 20 OCR-supported values**
+- [x] A legitimate list of drawn levels survives intact — specifically, **all 20 OCR-supported values**
       in the reproducing segment's head, and case 2's 15-item yellow-line list
-- [ ] Truncations are logged with the observed repeat count
-- [ ] `0` disables the guard; defaults are the measured values (`max_skeleton_repeat = 24`,
+- [x] Truncations are logged with the observed repeat count
+- [x] `0` disables the guard; defaults are the measured values (`max_skeleton_repeat = 24`,
       `min_skeleton_chars = 10`)
-- [ ] `docs/ARCHITECTURE.md` § Fidelity Diagnostic updated from "**Two** run at generation time" to
+- [x] `docs/ARCHITECTURE.md` § Fidelity Diagnostic updated from "**Two** run at generation time" to
       three, **in the implementation commit** (not before — documenting an unimplemented guard would be
       a phantom implementation)
-- [ ] `cargo test --workspace` passes
+- [x] `cargo test --workspace` passes
 
 ## Research backing
 

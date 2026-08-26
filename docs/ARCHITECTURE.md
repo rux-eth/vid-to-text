@@ -173,8 +173,9 @@ report it when the diagnostic is enabled in the server's base config.
 thumbnails of every kept frame (`thumbnail_width`, `thumbnail_quality`) so the check and the review
 stay reproducible after the job's working directory is cleaned.
 
-**Vision output guards.** Two run at generation time, before a segment is ever merged (editing after
-merge is forbidden by Segments Are Immutable After Merge):
+**Vision output guards.** Three run at generation time, in this order, before a segment is ever merged
+(editing after merge is forbidden by Segments Are Immutable After Merge). Each catches a mode the
+others cannot see, and each logs every cut with the count it observed:
 
 - `truncate_repetition` — cuts where a sentence of >=15 characters recurs a third time (from `6f10acd`).
 - `truncate_numeric_run` — caps consecutive numeric tokens at `vision.max_numeric_run`, keeping the
@@ -186,6 +187,33 @@ merge is forbidden by Segments Are Immutable After Merge):
   existing retry loop reproduces the same output. Compression ratio was measured as an alternative
   detector and rejected — it flags 12.5% of clean segments at 2.4 while still missing 3 of 18
   degenerate ones.
+- `truncate_skeleton_repeat` — caps how many times one sentence **skeleton** may recur at
+  `vision.max_skeleton_repeat`, ignoring skeletons shorter than `vision.min_skeleton_chars`. The
+  skeleton is the sentence with its numeric tokens masked. This catches a mode the other two miss *by
+  construction*: a repeated template with a varying slot — "A horizontal line is drawn at 29,000. … at
+  28,000. …" x267, marching past zero into negative prices — where every sentence is unique (so the
+  sentence guard is blind) and prose separates every number (so the longest consecutive run is 2).
+  Masking uses `char::is_numeric()` (Unicode `Nd|Nl|No`), **not** `is_ascii_digit()`: one observed case
+  varied a circled-glyph slot (`①②③` … `⑪④`), which ASCII masking rates at 14 — inside the legitimate
+  band — against 143 under Unicode masking. Measured over 11,108 guard-era visual segments (94
+  timelines, deduplicated, pre-guard timelines excluded): legitimate repeats top out at **13**,
+  degenerate ones are **143, 267 and 878**, so every cap in [14, 142] truncates the same segments. The
+  default 24 is therefore set by **head preservation**, not by that gap — the reproducing segment's
+  drawn levels are OCR-supported through position 20, so a lower cap would destroy real content in the
+  very segment the guard exists to fix. `min_skeleton_chars = 10` also closes `truncate_repetition`'s
+  15-character gate, through which a 878x verbatim loop of "You're not." had passed.
+
+**Sentence splitting is part of that guard's correctness, not an implementation detail.** A `.`
+terminates a sentence only when it is not inside a numeric token, so `1.738T` stays one token; and
+because masking is not length-preserving, the scan runs over the original text and keeps original
+offsets rather than masking the whole string and splitting that. A mask that swallowed the
+sentence-final period was measured collapsing one 275-sentence segment into 8.
+
+**The fidelity diagnostic cannot verify that guard on all inputs.** It scores numbers and labels, so
+the circled-glyph case yields 25 scored facts from 144 fabricated sentences: removing 12,236
+characters of fabrication changed no fidelity number at all. Precision recovery verifies the numeric
+variant (0.529 → 0.901 on the reproducing job); the non-numeric variant is verified by characters
+removed and by reading.
 
 **Comparing two arms.** Two runs of the same video at identical sampling are **segment-aligned by
 construction**: frame selection is pure ffmpeg and model-independent, so spans, per-segment frame

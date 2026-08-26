@@ -74,6 +74,9 @@ pub struct OllamaClient {
     grounding: OcrGroundingConfig,
     /// Degenerate-enumeration cap (PR-025).
     max_numeric_run: usize,
+    /// Repeated-skeleton cap and its minimum skeleton length (PR-028).
+    max_skeleton_repeat: usize,
+    min_skeleton_chars: usize,
 }
 
 impl OllamaClient {
@@ -103,6 +106,8 @@ impl OllamaClient {
             balanced_batches: vision_config.adaptive.enabled,
             grounding: vision_config.ocr_grounding.clone(),
             max_numeric_run: vision_config.max_numeric_run as usize,
+            max_skeleton_repeat: vision_config.max_skeleton_repeat as usize,
+            min_skeleton_chars: vision_config.min_skeleton_chars as usize,
         })
     }
 
@@ -264,7 +269,22 @@ impl OllamaClient {
                                 batch_idx, run, self.max_numeric_run, cleaned.len(), guarded.len()
                             );
                         }
-                        description = Some(guarded);
+                        // A repeated sentence template with a varying slot: every
+                        // sentence is unique so truncate_repetition cannot see it, and
+                        // prose separates the numbers so truncate_numeric_run cannot
+                        // either. Runs third, on their output. (PR-028)
+                        let (final_desc, repeat) = truncate_skeleton_repeat(
+                            &guarded,
+                            self.max_skeleton_repeat,
+                            self.min_skeleton_chars,
+                        );
+                        if repeat > 0 {
+                            eprintln!(
+                                "[vision] batch {} repeated one sentence skeleton {} times (cap {}), truncated from {} to {} chars",
+                                batch_idx, repeat, self.max_skeleton_repeat, guarded.len(), final_desc.len()
+                            );
+                        }
+                        description = Some(final_desc);
                         break;
                     }
                     Err(_) if attempt < 2 => {
@@ -546,6 +566,159 @@ fn truncate_repetition(text: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// End offset of a numeric token starting exactly at `start`, or `None`. (PR-028)
+///
+/// A deliberate sibling of `truncate_numeric_run`'s byte-based `number_end`: the same
+/// grammar (optional sign, optional `$`, digits, grouped or decimal digits, optional
+/// unit suffix) over a wider digit class. It scans chars and accepts any Unicode
+/// numeric character, so a slot filled with `\u{2460}` masks like one filled with `1`.
+/// `test_skeleton_tokenizer_matches_numeric_run_on_ascii` pins the two together on
+/// ASCII input, because duplicating a subtle tokenizer is how PR-025 nearly shipped
+/// the wrong threshold.
+fn skeleton_number_end(text: &str, start: usize) -> Option<usize> {
+    let s = &text[start..];
+    let mut it = s.char_indices().peekable();
+    if let Some(&(_, c)) = it.peek() {
+        if c == '-' || c == '+' {
+            it.next();
+        }
+    }
+    if let Some(&(_, c)) = it.peek() {
+        if c == '$' {
+            it.next();
+        }
+    }
+    let mut digits = 0usize;
+    while let Some(&(_, c)) = it.peek() {
+        if c.is_numeric() {
+            it.next();
+            digits += 1;
+        } else {
+            break;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    // A ',' or '.' continues the token only when a digit follows it -- which is what
+    // keeps "1.738" one token and keeps the '.' in "71,836." a sentence terminator.
+    loop {
+        let mut ahead = it.clone();
+        let sep = ahead.next();
+        let next = ahead.peek().copied();
+        match (sep, next) {
+            (Some((_, sep)), Some((_, d))) if (sep == ',' || sep == '.') && d.is_numeric() => {
+                it.next();
+                while let Some(&(_, c)) = it.peek() {
+                    if c.is_numeric() {
+                        it.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    if let Some(&(_, c)) = it.peek() {
+        if matches!(c, '%' | 'k' | 'K' | 'M' | 'B' | 'T') {
+            it.next();
+        }
+    }
+    Some(start + it.peek().map(|&(o, _)| o).unwrap_or(s.len()))
+}
+
+/// Sentence starts (in ORIGINAL byte offsets) paired with their masked skeletons. (PR-028)
+///
+/// Masking is **not** length-preserving, so this deliberately does not mask the whole
+/// string and split that -- there would be no way back to the cut position, and a mask
+/// that swallowed the sentence-final period collapsed the reproducing segment from 275
+/// sentences to 8 when it was tried. Instead it scans the original text once, treating
+/// '.' as a terminator only when `skeleton_number_end` says it is not inside a number.
+fn skeleton_sentences(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut prev_alnum = false;
+    while i < text.len() {
+        if !prev_alnum {
+            if let Some(end) = skeleton_number_end(text, i) {
+                buf.push('#');
+                prev_alnum = text[i..end].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric());
+                i = end;
+                continue;
+            }
+        }
+        let c = text[i..].chars().next().expect("i is a char boundary below text.len()");
+        i += c.len_utf8();
+        if c == '.' {
+            out.push((start, buf.trim().to_lowercase()));
+            start = i;
+            buf.clear();
+            prev_alnum = false;
+            continue;
+        }
+        buf.push(c);
+        prev_alnum = c.is_ascii_alphanumeric();
+    }
+    if !buf.trim().is_empty() {
+        out.push((start, buf.trim().to_lowercase()));
+    }
+    out
+}
+
+/// Truncate a repeated sentence template with a varying slot. (PR-028)
+///
+/// A third degeneration mode, which both existing guards are blind to by construction:
+/// the model repeats one sentence skeleton and varies a single slot -- "A horizontal
+/// line is drawn at 29,000. ... at 28,000. ..." marching past zero into negative
+/// Bitcoin prices (267 times), or "- A white line is drawn ... labeled \"\u{2460}\"."
+/// through 143 circled glyphs. `truncate_numeric_run` sees a longest consecutive run of
+/// 2, because prose separates every number; `truncate_repetition` sees only unique
+/// sentences, because the slot differs every time.
+///
+/// The skeleton is the sentence with its numeric tokens masked, using
+/// `char::is_numeric()` (Unicode `Nd|Nl|No`) rather than `is_ascii_digit()`. Measured
+/// over 11,108 guard-era visual segments from this corpus with this same tokenizer: the
+/// ASCII predicate rates the circled-glyph case at 14, inside a legitimate band that
+/// tops out at 13, while the Unicode predicate rates it 143 -- an order of magnitude
+/// clear of every legitimate segment. Degenerate repeats are 143, 267 and 878.
+///
+/// Skeletons shorter than `min_chars` are ignored, as `truncate_repetition` ignores
+/// sentences under 15 characters; 10 is measured to catch all three degenerate segments
+/// at the same legitimate maximum, while 40 would lose the reproducing case entirely.
+/// When a skeleton recurs more than `max_repeat` times the text is cut at the start of
+/// the (`max_repeat` + 1)-th occurrence, so the legitimate head survives. Returns the
+/// text unchanged when `max_repeat` is 0 or no skeleton exceeds it.
+pub fn truncate_skeleton_repeat(text: &str, max_repeat: usize, min_chars: usize) -> (String, usize) {
+    use std::collections::BTreeMap;
+
+    if max_repeat == 0 {
+        return (text.to_string(), 0);
+    }
+    // BTreeMap, not HashMap: ties must break the same way on every run.
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (start, skel) in skeleton_sentences(text) {
+        if skel.chars().count() >= min_chars {
+            groups.entry(skel).or_default().push(start);
+        }
+    }
+    let Some((_, starts)) = groups.into_iter().max_by_key(|(_, v)| v.len()) else {
+        return (text.to_string(), 0);
+    };
+    if starts.len() <= max_repeat {
+        return (text.to_string(), 0);
+    }
+    let cut = starts[max_repeat];
+    let head = text[..cut].trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
+    let mut out = head.to_string();
+    if !out.ends_with('.') && !out.ends_with(')') {
+        out.push_str(" ...");
+    }
+    (out, starts.len())
 }
 
 /// Build the full prompt by combining the template with optional context and transcript.
@@ -1336,5 +1509,195 @@ mod tests {
         assert!(run >= 40, "got {run}");
         assert!(out.starts_with("Levels: 2.514T"));
         assert!(out.len() < text.len());
+    }
+
+    // --- PR-028: repeated sentence skeleton with a varying slot ---
+
+    /// Group digits the way the model writes prices, so the tests exercise the real shape.
+    fn commas(v: i64) -> String {
+        let digits = v.abs().to_string();
+        let mut out = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        if v < 0 { format!("-{out}") } else { out }
+    }
+
+    /// The real `2fc10c93` segment 106 failure: 20 genuinely drawn levels, then a
+    /// round-number ramp that marches through zero into negative Bitcoin prices.
+    /// 267 occurrences of one skeleton; the longest *consecutive numeric run* is 2,
+    /// which is why `truncate_numeric_run` is blind to it.
+    #[test]
+    fn test_truncate_skeleton_repeat_on_the_real_template_ramp() {
+        // Levels 1-18 and 20 are OCR-supported in the job's fidelity.json; 30,000 is
+        // the last supported value, so any cap at or below 20 destroys real content.
+        let supported = [
+            "71,836", "68,993", "68,493", "65,854", "63,892", "62,965", "60,004", "57,139",
+            "55,738", "51,860", "50,875", "48,925", "46,258", "42,241", "39,145", "38,720",
+            "33,907", "32,276", "31,145", "30,000",
+        ];
+        let mut text = String::from(
+            "The chart is overlaid with multiple technical analysis tools. A large shaded blue \
+             rectangle is drawn around a price zone near the bottom of the chart. \
+             A horizontal line is drawn at 71,836. Another horizontal line is drawn at 69,358. ",
+        );
+        for v in &supported[1..] {
+            text.push_str(&format!("A horizontal line is drawn at {v}. "));
+        }
+        let mut v: i64 = 29_000;
+        while v >= -217_000 {
+            text.push_str(&format!("A horizontal line is drawn at {}. ", commas(v)));
+            v -= 1_000;
+        }
+
+        // The guard the mode defeats: prose separates every number, so there is no run.
+        assert_eq!(truncate_numeric_run(&text, 40).1, 0, "numeric-run guard must be blind here");
+
+        let (out, rep) = truncate_skeleton_repeat(&text, 24, 10);
+        assert_eq!(rep, 267, "reports the observed skeleton repeat count");
+        for keep in supported {
+            assert!(out.contains(keep), "OCR-supported level {keep} was cut: {out}");
+        }
+        assert!(out.contains("Another horizontal line is drawn at 69,358"), "{out}");
+        assert!(out.contains("26,000"), "residue stops after the 24th occurrence: {out}");
+        assert!(!out.contains("25,000"), "cut lands at the 25th occurrence: {out}");
+        assert!(!out.contains('-'), "no negative prices survive: {out}");
+        assert!(out.len() < text.len() / 5, "{} -> {}", text.len(), out.len());
+    }
+
+    /// The `84149f3b` segment 109 failure, whose varying slot is circled glyphs rather
+    /// than ASCII digits. This is the case that fails if the mask uses `is_ascii_digit`:
+    /// measured over 11,108 segments it scores 14 under ASCII masking, inside the
+    /// legitimate band, and 143 under `char::is_numeric()`, an order of magnitude clear.
+    #[test]
+    fn test_truncate_skeleton_repeat_catches_non_ascii_numeric_slot() {
+        let mut text = String::from("Several trend lines are drawn on the chart. ");
+        for i in 0..40u32 {
+            let glyph = char::from_u32(0x2460 + i).unwrap();
+            text.push_str(&format!(
+                "- A white line is drawn from the bottom left to the top right, \
+                 passing through the point labeled \"{glyph}\". "
+            ));
+        }
+        // Neither shipped guard can see it: no numeric run, and every sentence is unique.
+        assert_eq!(truncate_numeric_run(&text, 40).1, 0, "no ASCII numeric run exists");
+        assert_eq!(truncate_repetition(&text), text.trim(), "every sentence is unique");
+
+        let (out, rep) = truncate_skeleton_repeat(&text, 24, 10);
+        assert_eq!(rep, 40, "the glyph slot masks like a digit slot");
+        assert!(out.starts_with("Several trend lines"));
+        assert!(out.contains('\u{2460}'), "the legitimate head survives: {out}");
+        assert!(!out.contains('\u{2487}'), "the tail is cut: {out}");
+    }
+
+    /// Headroom: the largest legitimate skeleton repeat measured across 11,108
+    /// guard-era visual segments is 13, so a 13-sentence list must pass untouched.
+    #[test]
+    fn test_truncate_skeleton_repeat_leaves_legitimate_lists_alone() {
+        let mut text = String::from("The chart shows several marked levels. ");
+        for i in 0..13 {
+            text.push_str(&format!("A horizontal line is drawn at {}. ", commas(43_666 + i * 700)));
+        }
+        let (out, rep) = truncate_skeleton_repeat(&text, 24, 10);
+        assert_eq!(rep, 0, "13 is the measured legitimate maximum");
+        assert_eq!(out, text);
+
+        // Ordinary prose never groups.
+        let prose = "Price rose to 71,958 before falling to 71,580. The cursor then moved right.";
+        assert_eq!(truncate_skeleton_repeat(prose, 24, 10), (prose.to_string(), 0));
+    }
+
+    /// A '.' inside a numeric token is not a sentence boundary. If it were, the cut
+    /// would land mid-number instead of between sentences.
+    #[test]
+    fn test_truncate_skeleton_repeat_does_not_split_decimals() {
+        let mut text = String::new();
+        for i in 0..30 {
+            text.push_str(&format!("The level at {}.{}T held firm. ", 1 + i / 10, i % 10));
+        }
+        let (out, rep) = truncate_skeleton_repeat(&text, 24, 10);
+        assert_eq!(rep, 30, "each decimal sentence is one sentence, not two");
+        assert_eq!(out.matches("held firm").count(), 24, "cut at the 25th sentence: {out}");
+        assert!(out.ends_with("held firm."), "cut lands on a sentence boundary: {out}");
+
+        // A suffixed value and a signed percentage stay single tokens too.
+        let mixed = "The market cap is 1.738T. The change is -0.70% today.";
+        assert_eq!(truncate_skeleton_repeat(mixed, 24, 10), (mixed.to_string(), 0));
+    }
+
+    /// `truncate_repetition` ignores sentences under 15 characters, which lets a short
+    /// verbatim loop through: `37a3242c` segment 130 repeated "You're not." 878 times.
+    /// `min_skeleton_chars = 10` closes that gap; 15 would not.
+    #[test]
+    fn test_truncate_skeleton_repeat_min_chars_gate() {
+        let mut text = String::from("The man addresses George McFly, encouraging him to stand tall. ");
+        for _ in 0..30 {
+            text.push_str("You're not. ");
+        }
+        let (out, rep) = truncate_skeleton_repeat(&text, 24, 10);
+        assert_eq!(rep, 30, "a 10-character skeleton is inside the gate");
+        assert_eq!(out.matches("You're not").count(), 24, "{out}");
+
+        assert_eq!(
+            truncate_skeleton_repeat(&text, 24, 15).1,
+            0,
+            "at 15 the skeleton is below the gate, as it is for truncate_repetition"
+        );
+    }
+
+    /// The defaults come from measuring 11,108 guard-era visual segments with this
+    /// tokenizer: legitimate repeats top out at 13, degenerate ones are 143 and above.
+    /// The cap is set by head preservation, not by that gap -- the reproducing
+    /// segment's levels are OCR-supported through position 20.
+    #[test]
+    fn test_default_skeleton_caps_sit_in_the_measured_band() {
+        let cfg = VisionConfig::default();
+        assert_eq!(cfg.max_skeleton_repeat, 24);
+        assert_eq!(cfg.min_skeleton_chars, 10);
+        let cap = cfg.max_skeleton_repeat as usize;
+        let min = cfg.min_skeleton_chars as usize;
+        assert!(cap > 20, "must clear the last OCR-supported level in the reproducing segment");
+        assert!(cap > 13, "must clear the largest legitimate repeat measured");
+        assert!(cap < 143, "must catch the smallest degenerate repeat measured");
+
+        let legit: String = (0..13)
+            .map(|i| format!("A horizontal line is drawn at {}. ", commas(40_000 + i * 900)))
+            .collect();
+        assert_eq!(truncate_skeleton_repeat(&legit, cap, min).1, 0, "13 passes");
+        let degen: String = (0..143)
+            .map(|i| format!("A horizontal line is drawn at {}. ", commas(40_000 - i * 1_000)))
+            .collect();
+        assert_eq!(truncate_skeleton_repeat(&degen, cap, min).1, 143, "143 is caught");
+    }
+
+    #[test]
+    fn test_truncate_skeleton_repeat_disabled() {
+        let text: String = (0..100)
+            .map(|i| format!("A horizontal line is drawn at {i}. "))
+            .collect();
+        assert_eq!(truncate_skeleton_repeat(&text, 0, 10), (text.clone(), 0), "0 disables");
+        assert_eq!(truncate_skeleton_repeat(&text, 24, 10).1, 100);
+    }
+
+    /// The skeleton tokenizer is a deliberate sibling of `truncate_numeric_run`'s
+    /// byte-based one -- same grammar, wider digit class. Duplicating a subtle
+    /// tokenizer invites drift, which is the exact near-miss PR-025 recorded, so pin
+    /// the two against each other on ASCII input.
+    #[test]
+    fn test_skeleton_tokenizer_matches_numeric_run_on_ascii() {
+        for probe in [
+            "71,836", "-0.70%", "1.738T", "$1,024", "+42", "0", "3.14159", "12k", "9B",
+        ] {
+            let sentence = format!("The value {probe} appears once");
+            let sents = skeleton_sentences(&sentence);
+            assert_eq!(sents.len(), 1, "{probe} must not split the sentence: {sents:?}");
+            assert_eq!(
+                sents[0].1, "the value # appears once",
+                "{probe} must mask as exactly one token"
+            );
+        }
     }
 }

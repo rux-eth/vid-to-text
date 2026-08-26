@@ -378,6 +378,28 @@ pub struct VisionConfig {
     /// degenerate ones start at 166, so 40 sits in the gap and truncates exactly
     /// the 18 degenerate segments (0.74%).
     pub max_numeric_run: u32,
+    /// Cap on how many times one sentence *skeleton* may recur in a visual
+    /// description (PR-028). `0` disables.
+    ///
+    /// A third degeneration mode, invisible to both other guards: one sentence
+    /// template repeated with a varying slot -- "A horizontal line is drawn at
+    /// 29,000. ... at 28,000. ..." running past zero into negative prices (267
+    /// times), or the same sentence through 143 circled glyphs. Measured over
+    /// 11,108 guard-era visual segments with the guard's own tokenizer:
+    /// legitimate repeats top out at 13 and degenerate ones are 143, 267 and 878,
+    /// so every cap in [14, 142] truncates the same segments. 24 is chosen from
+    /// *head preservation* rather than from that gap -- the reproducing segment's
+    /// drawn levels are OCR-supported through position 20, so a lower cap would
+    /// destroy real content in the very segment the guard exists to fix.
+    pub max_skeleton_repeat: u32,
+    /// Minimum skeleton length, in characters, for `max_skeleton_repeat` (PR-028).
+    ///
+    /// Mirrors `truncate_repetition`, which ignores sentences under 15 characters
+    /// -- a gate that let a 878x verbatim loop of "You're not." through. Measured:
+    /// 10 catches all three degenerate segments on this corpus at the same
+    /// legitimate maximum (13) and the same false-positive count as 15, while 40
+    /// would lose the reproducing case entirely (its skeleton is 31 characters).
+    pub min_skeleton_chars: u32,
 }
 
 /// Content-adaptive frame selection within each chunk (PR-022).
@@ -579,6 +601,8 @@ impl Default for VisionConfig {
             adaptive: AdaptiveSamplingConfig::default(),
             ocr_grounding: OcrGroundingConfig::default(),
             max_numeric_run: 40,
+            max_skeleton_repeat: 24,
+            min_skeleton_chars: 10,
         }
     }
 }

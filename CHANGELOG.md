@@ -44,6 +44,17 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
   Catches both observed modes — an arithmetic ramp and a repeated value — which the existing
   sentence-repetition guard could not see. (PR-025)
 
+- Guard against repeated sentence templates in vision output (`vision.max_skeleton_repeat`,
+  `vision.min_skeleton_chars`): a visual description that repeats one sentence *skeleton* — the
+  sentence with its numeric tokens masked — more than 24 times is truncated at the cap, keeping the
+  legitimate head. This is a third degeneration mode that both existing guards miss by construction:
+  every sentence is unique because the slot differs, and prose separates every number so there is no
+  consecutive run. Observed producing 267 drawn price levels marching past zero into negative Bitcoin
+  prices, which dragged one video's precision from 0.926 to 0.529; with the guard it scores 0.901.
+  The mask uses `char::is_numeric()` rather than ASCII digits, because one observed case varied a
+  circled-glyph slot (`①②③`) that ASCII masking cannot see. Thresholds measured over 11,108 visual
+  segments: legitimate repeats top out at 13, degenerate ones are 143 and above. (PR-028)
+
 ### Changed
 - OCR engine configuration moved from `[fidelity]` to its own `[ocr]` section, shared by the fidelity
   diagnostic and OCR grounding; each job now OCRs its frames once, overlapped with GPU work. (PR-024)

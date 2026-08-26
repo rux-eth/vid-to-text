@@ -72,7 +72,7 @@ Full PR descriptions live in `prs/`. This file is the index.
 | [PR-024](../../prs/PR-024-ocr-grounded-vision-prompt.md) | OCR-grounded vision prompt | `[x]` | PR-022, PR-023 |
 | [PR-025](../../prs/PR-025-vision-degeneration-guard.md) | Vision degeneration guard | `[x]` | PR-023 |
 | [PR-026](../../prs/PR-026-content-specific-vision-prompt.md) | Content-specific vision prompt | `[x]` | PR-022, PR-023, PR-025 |
-| [PR-028](../../prs/PR-028-template-ramp-degeneration-guard.md) | Template-ramp degeneration guard | `[ ]` | PR-023, PR-025 |
+| [PR-028](../../prs/PR-028-template-ramp-degeneration-guard.md) | Template-ramp degeneration guard | `[x]` | PR-023, PR-025 |
 
 **Index note:** PR-009 never existed; PR-011..PR-015 are listed above without PR files;
 PR-016/PR-017 landed in git history but were never indexed. See
