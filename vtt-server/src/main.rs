@@ -45,6 +45,12 @@ struct JobResponse {
     status: JobStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// The profile actually applied to this job. Echoed at submission so a
+    /// caller can see what ran without waiting for the timeline's `capture`
+    /// block -- a job that silently ran under the wrong config cost ~108 minutes
+    /// of GPU time on 2026-08-25. `None` means the server's base config. (PR-032)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
 }
 
 // --- Internal state ---
@@ -55,6 +61,7 @@ struct JobEntry {
     status: JobStatus,
     error: Option<String>,
     cancel_token: Option<CancellationToken>,
+    profile: Option<String>,
 }
 
 impl JobEntry {
@@ -64,6 +71,7 @@ impl JobEntry {
             source: self.source.clone(),
             status: self.status.clone(),
             error: self.error.clone(),
+            profile: self.profile.clone(),
         }
     }
 }
@@ -195,6 +203,7 @@ async fn load_persisted_results(
             status: JobStatus::Completed,
             error: None,
             cancel_token: None,
+            profile: None,
         };
 
         jobs.insert(meta.id, job_entry);
@@ -379,6 +388,7 @@ async fn create_job(
         status: JobStatus::Queued,
         error: None,
         cancel_token: None,
+        profile: request.profile.clone(),
     };
     let response = entry.to_response();
 
@@ -393,21 +403,29 @@ async fn create_job(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-async fn upload_job(
-    State(state): State<Arc<AppState>>,
+
+/// Fields accepted by the multipart upload endpoint.
+struct UploadFields {
+    filename: String,
+    force: bool,
+    profile: Option<String>,
+}
+
+/// Read every field of a multipart upload, in whatever order the client sent
+/// them, streaming the `file` part to `upload_path`.
+///
+/// Order-independence is the point. This loop previously `break`s on `file`,
+/// which silently discarded every later field: the shipped client appends
+/// `force` after the file part, so `--force` was ignored on every local upload,
+/// and `profile` was ignored for any caller that did not happen to send it
+/// first. Extracted from the handler so that behaviour is testable. (PR-032)
+async fn read_upload_fields(
     mut multipart: Multipart,
-) -> Result<impl IntoResponse, ApiError> {
-    let job_id = Uuid::new_v4();
-    let job_dir = PathBuf::from(&state.config.processing.temp_dir).join(job_id.to_string());
-
-    tokio::fs::create_dir_all(&job_dir)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to create job dir: {e}")))?;
-
+    upload_path: &std::path::Path,
+) -> Result<UploadFields, ApiError> {
     let mut filename = String::new();
     let mut force = false;
     let mut profile: Option<String> = None;
-    let upload_path = job_dir.join("input.mp4");
 
     while let Some(field) = multipart
         .next_field()
@@ -429,16 +447,13 @@ async fn upload_job(
         }
 
         if field.name() == Some("file") {
-            filename = field
-                .file_name()
-                .unwrap_or("upload.mp4")
-                .to_string();
+            filename = field.file_name().unwrap_or("upload.mp4").to_string();
 
             if !filename.ends_with(".mp4") {
                 return Err(ApiError::BadRequest("only mp4 files are supported".into()));
             }
 
-            let mut file = tokio::fs::File::create(&upload_path)
+            let mut file = tokio::fs::File::create(upload_path)
                 .await
                 .map_err(|e| ApiError::Internal(format!("failed to create upload file: {e}")))?;
 
@@ -457,9 +472,27 @@ async fn upload_job(
                 .await
                 .map_err(|e| ApiError::Internal(format!("failed to flush upload file: {e}")))?;
 
-            break;
+            // Deliberately NOT `break` -- see the doc comment above.
+            continue;
         }
     }
+
+    Ok(UploadFields { filename, force, profile })
+}
+
+async fn upload_job(
+    State(state): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    let job_id = Uuid::new_v4();
+    let job_dir = PathBuf::from(&state.config.processing.temp_dir).join(job_id.to_string());
+
+    tokio::fs::create_dir_all(&job_dir)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to create job dir: {e}")))?;
+
+    let upload_path = job_dir.join("input.mp4");
+    let UploadFields { filename, force, profile } = read_upload_fields(multipart, &upload_path).await?;
 
     if filename.is_empty() {
         return Err(ApiError::BadRequest(
@@ -473,6 +506,7 @@ async fn upload_job(
         status: JobStatus::Queued,
         error: None,
         cancel_token: None,
+        profile: profile.clone(),
     };
     let response = entry.to_response();
 
@@ -502,6 +536,7 @@ async fn create_url_job(
         status: JobStatus::Queued,
         error: None,
         cancel_token: None,
+        profile: request.profile.clone(),
     };
     let response = entry.to_response();
 
@@ -777,6 +812,128 @@ async fn main() {
 mod tests {
     use super::*;
 
+
+    // --- PR-032: the multipart upload endpoint had no test coverage at all,
+    // which is why `--force` could be silently dropped on every local upload. ---
+
+    fn multipart_body(parts: &[(&str, Option<&str>, &str)]) -> (String, String) {
+        let boundary = "vtt032boundary";
+        let mut body = String::new();
+        for (name, filename, value) in parts {
+            body.push_str(&format!("--{boundary}\r\n"));
+            match filename {
+                Some(f) => body.push_str(&format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\nContent-Type: video/mp4\r\n\r\n"
+                )),
+                None => body.push_str(&format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n")),
+            }
+            body.push_str(value);
+            body.push_str("\r\n");
+        }
+        body.push_str(&format!("--{boundary}--\r\n"));
+        (boundary.to_string(), body)
+    }
+
+    async fn read_fields(parts: &[(&str, Option<&str>, &str)]) -> UploadFields {
+        use axum::extract::FromRequest;
+        let (boundary, body) = multipart_body(parts);
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let mp = Multipart::from_request(req, &()).await.unwrap();
+        let dir = std::env::temp_dir().join(format!("vtt032-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = match read_upload_fields(mp, &dir.join("input.mp4")).await {
+            Ok(v) => v,
+            Err(_) => panic!("read_upload_fields rejected a valid multipart body"),
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    /// The exact shape the shipped client sends: file part FIRST, scalars after.
+    /// This is what the old `break` discarded -- `--force` never reached the
+    /// server on any local upload.
+    #[tokio::test]
+    async fn test_upload_fields_survive_file_first_ordering() {
+        let f = read_fields(&[
+            ("file", Some("clip.mp4"), "FAKEMP4"),
+            ("force", None, "true"),
+            ("profile", None, "market-research"),
+        ])
+        .await;
+        assert_eq!(f.filename, "clip.mp4");
+        assert!(f.force, "force after the file part must still be read");
+        assert_eq!(f.profile.as_deref(), Some("market-research"), "profile after the file part must still be read");
+    }
+
+    /// And the `curl` workaround's ordering must keep working.
+    #[tokio::test]
+    async fn test_upload_fields_survive_file_last_ordering() {
+        let f = read_fields(&[
+            ("profile", None, "market-research"),
+            ("force", None, "true"),
+            ("file", Some("clip.mp4"), "FAKEMP4"),
+        ])
+        .await;
+        assert_eq!(f.filename, "clip.mp4");
+        assert!(f.force);
+        assert_eq!(f.profile.as_deref(), Some("market-research"));
+    }
+
+    /// Field order must not change what the server applies.
+    #[tokio::test]
+    async fn test_upload_field_order_is_irrelevant() {
+        let first = read_fields(&[
+            ("file", Some("a.mp4"), "X"),
+            ("force", None, "true"),
+            ("profile", None, "p"),
+        ])
+        .await;
+        let last = read_fields(&[
+            ("force", None, "true"),
+            ("profile", None, "p"),
+            ("file", Some("a.mp4"), "X"),
+        ])
+        .await;
+        assert_eq!(first.filename, last.filename);
+        assert_eq!(first.force, last.force);
+        assert_eq!(first.profile, last.profile);
+    }
+
+    /// Absent scalars mean base config, not a spurious profile.
+    #[tokio::test]
+    async fn test_upload_without_scalars_defaults_cleanly() {
+        let f = read_fields(&[("file", Some("a.mp4"), "X")]).await;
+        assert!(!f.force);
+        assert_eq!(f.profile, None);
+    }
+
+    /// The response echoes what the server applied, so a caller sees the config
+    /// at submission instead of discovering it in the timeline afterwards.
+    #[test]
+    fn test_job_response_reports_applied_profile() {
+        let entry = JobEntry {
+            id: Uuid::nil(),
+            source: "a.mp4".into(),
+            status: JobStatus::Queued,
+            error: None,
+            cancel_token: None,
+            profile: Some("market-research".into()),
+        };
+        let json = serde_json::to_string(&entry.to_response()).unwrap();
+        assert!(json.contains("\"profile\":\"market-research\""), "{json}");
+
+        let base = JobEntry { profile: None, ..entry };
+        let json = serde_json::to_string(&base.to_response()).unwrap();
+        assert!(!json.contains("profile"), "base config must not invent a profile name: {json}");
+    }
+
     #[test]
     fn test_job_response_serialization() {
         let resp = JobResponse {
@@ -784,6 +941,7 @@ mod tests {
             source: "video.mp4".into(),
             status: JobStatus::Queued,
             error: None,
+            profile: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "queued");
@@ -798,6 +956,7 @@ mod tests {
             source: "video.mp4".into(),
             status: JobStatus::Failed,
             error: Some("something broke".into()),
+            profile: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "failed");

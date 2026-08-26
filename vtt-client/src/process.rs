@@ -40,6 +40,7 @@ pub async fn process_single_file(
     config: &ClientConfig,
     input_path: &Path,
     force: bool,
+    profile: Option<String>,
 ) -> Result<(), String> {
     let server_url = config.server_url();
     let filename = input_path
@@ -64,8 +65,14 @@ pub async fn process_single_file(
 
     // Upload
     eprintln!("Uploading {filename}...");
-    let job = api::upload_file(client, &server_url, input_path, force).await?;
-    eprintln!("Job {} created for {filename}", job.id);
+    let job = api::upload_file(client, &server_url, input_path, force, profile).await?;
+    // Echo what the server says it applied, not what we asked for. A job that ran
+    // under the wrong config burned ~108 minutes of GPU time on 2026-08-25
+    // precisely because nothing was reported until the timeline was read. (PR-032)
+    match job.profile.as_deref() {
+        Some(p) => eprintln!("Job {} created for {filename} (profile: {p})", job.id),
+        None => eprintln!("Job {} created for {filename} (profile: server default)", job.id),
+    }
 
     // Poll until done
     api::poll_until_done(client, &server_url, &job.id, &filename, config).await?;
@@ -136,6 +143,7 @@ pub async fn process_directory(
     config: &ClientConfig,
     dir: &Path,
     force: bool,
+    profile: Option<String>,
 ) -> Result<(), String> {
     let files = find_mp4_files(dir)?;
 
@@ -149,7 +157,7 @@ pub async fn process_directory(
     let total = files.len();
 
     for file in &files {
-        match process_single_file(client, config, file, force).await {
+        match process_single_file(client, config, file, force, profile.clone()).await {
             Ok(()) => success += 1,
             Err(e) => eprintln!("Error processing {}: {e}", file.display()),
         }

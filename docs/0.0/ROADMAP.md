@@ -86,7 +86,7 @@ that stand between the current state and being able to claim it.
 | 1 | [PR-029](../../prs/PR-029-fidelity-prices-non-numeric-fabrication.md) | Fidelity diagnostic prices non-numeric fabrication | Tier-2 | `[x]` | PR-023, PR-028 |
 | 2 | [PR-030](../../prs/PR-030-close-vision-prompt-shipping-decision.md) | Close the vision-prompt shipping decision (no ranking — see note) | Tier-1 | `[ ]` | PR-029, PR-032, PR-026 |
 | 3 | [PR-031](../../prs/PR-031-word-run-degeneration-guard.md) | Word-run degeneration guard | Tier-1 | `[ ]` | PR-029, PR-028 |
-| — | [PR-032](../../prs/PR-032-config-fidelity-for-job-submission.md) | Config fidelity for job submission | Tier-1 | `[ ]` | — |
+| — | [PR-032](../../prs/PR-032-config-fidelity-for-job-submission.md) | Config fidelity for job submission | Tier-1 | `[x]` | — |
 
 **Why this order.** PR-029 comes first because every quality figure the project has — including the
 whole PR-026 prompt table and any threshold PR-031 would set — was produced by a metric that cannot see

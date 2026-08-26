@@ -209,6 +209,7 @@ pub async fn process_video(
                     ocr_by_chunk.get(&ci).map(|v| v.as_slice()).unwrap_or(&[]),
                     &whisper_segments,
                     prev_context.as_deref(),
+                    cancel_token.as_ref(),
                 )
                 .await?;
             let n_batches = (artifact.frames.len() + config.vision.max_frames_per_request as usize - 1) / config.vision.max_frames_per_request as usize;

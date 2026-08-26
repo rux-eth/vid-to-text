@@ -18,6 +18,9 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
 - **`FidelitySummary.signature`** — a sacreBLEU-style comparability string covering the metric version
   and every scoring setting that can move a figure. Two reports with identical signatures are
   comparable; two with different signatures are not. (PR-029)
+- The job response reports the profile the server actually applied, and the client prints it at
+  submission, so a misconfigured run is visible before it burns GPU time rather than afterwards in the
+  timeline's `capture` block. (PR-032)
 - Content-adaptive frame sampling (`[vision.adaptive]`): a uniform floor plus scene-change-triggered
   frames, de-clustered, with a per-chunk cap. Fixed-fps mode is unchanged and remains the default. (PR-022)
 - Visual segments now carry the real capture timestamps of their frames (`frames`), and the timeline
@@ -67,6 +70,15 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
   segments: legitimate repeats top out at 13, degenerate ones are 143 and above. (PR-028)
 
 ### Fixed
+- `--profile` now applies to local files and directories, not only to `--url`. It was accepted by the
+  CLI and never sent: the upload path had no profile parameter at all, so every local job silently ran
+  under the server's base config — wrong sampling, wrong prompt and wrong transcript policy. (PR-032)
+- `--force` now reaches the server on local uploads. The multipart handler stopped reading fields at
+  the file part while the client appends its scalar fields after it, so `--force` had never taken
+  effect for a file or directory. Field order no longer changes what the server applies. (PR-032)
+- A cancelled job now stops at the next vision batch instead of running out the whole chunk — roughly
+  30 seconds instead of ~13 minutes at fixed-mode frame counts, during which it held the GPU and
+  blocked the queue. (PR-032)
 - `vtt-client rescore` no longer drops `ocr_grounded`, which silently turned every re-scored
   OCR-grounded run into one that appeared not to be — discarding the warning that its precision is
   circular. (PR-029)

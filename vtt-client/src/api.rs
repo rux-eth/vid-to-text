@@ -12,6 +12,10 @@ pub struct JobResponse {
     pub source: String,
     pub status: String,
     pub error: Option<String>,
+    /// The profile the SERVER says it applied. Absent from older servers, and
+    /// absent when the job runs under the server's base config. (PR-032)
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +41,7 @@ pub async fn upload_file(
     server_url: &str,
     input_path: &Path,
     force: bool,
+    profile: Option<String>,
 ) -> Result<JobResponse, String> {
     let filename = input_path
         .file_name()
@@ -54,10 +59,17 @@ pub async fn upload_file(
         .file_name(filename)
         .mime_str("video/mp4")
         .map_err(|e| format!("failed to set mime type: {e}"))?;
-    let mut form = reqwest::multipart::Form::new().part("file", part);
+    // Scalar fields FIRST, file part LAST. The server reads every field
+    // regardless of order (PR-032), but a server that stops at `file` -- as this
+    // one did, silently discarding `--force` on every upload -- still sees these.
+    let mut form = reqwest::multipart::Form::new();
     if force {
         form = form.text("force", "true");
     }
+    if let Some(name) = profile {
+        form = form.text("profile", name);
+    }
+    let form = form.part("file", part);
 
     let resp = client
         .post(format!("{server_url}/jobs/upload"))

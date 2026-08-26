@@ -235,9 +235,9 @@ async fn main() {
                         eprintln!("Error: only mp4 files are supported");
                         std::process::exit(1);
                     }
-                    process::process_single_file(&client, &config, path, force).await
+                    process::process_single_file(&client, &config, path, force, profile.clone()).await
                 } else if path.is_dir() {
-                    process::process_directory(&client, &config, path, force).await
+                    process::process_directory(&client, &config, path, force, profile.clone()).await
                 } else {
                     Err(format!("{} not found", path.display()))
                 }

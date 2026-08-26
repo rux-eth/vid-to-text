@@ -156,6 +156,10 @@ impl OllamaClient {
     /// Returns one Visual segment per batch of frames. Segment bounds and the
     /// per-frame time labels in the prompt come from the frames' real timestamps
     /// (PR-022), never from an assumed spacing.
+    /// `cancel` is checked at the top of every batch, which bounds how long a
+    /// cancelled job keeps the GPU. It sits OUTSIDE the per-batch retry loop
+    /// below, so a cancellation can never be mistaken for a failed attempt or
+    /// consume a retry. (PR-032)
     pub async fn describe_chunk(
         &self,
         chunk: &Chunk,
@@ -163,6 +167,7 @@ impl OllamaClient {
         ocr: &[OcrFrame],
         whisper_segments: &[Segment],
         previous_context: Option<&str>,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<Segment>, VttError> {
         if frames.is_empty() {
             return Ok(Vec::new());
@@ -174,6 +179,21 @@ impl OllamaClient {
         let mut segments = Vec::new();
         let mut frame_offset = 0usize;
         for (batch_idx, &size) in sizes.iter().enumerate() {
+            // Before any work for this batch: a cancelled job must not start
+            // another Ollama request. Previously the only checks were around the
+            // whole vision pass, so a cancelled job held the GPU for the rest of
+            // the chunk -- ~13 minutes at fixed-mode frame counts. (PR-032)
+            if let Some(token) = cancel {
+                if token.is_cancelled() {
+                    eprintln!(
+                        "[vision] cancelled before batch {}/{} of chunk {}",
+                        batch_idx + 1,
+                        sizes.len(),
+                        chunk.index
+                    );
+                    return Err(VttError::Cancelled);
+                }
+            }
             let batch = &encoded[frame_offset..frame_offset + size];
             let (batch_start, batch_end) =
                 batch_bounds(frames, frame_offset, batch.len(), chunk.end_seconds);
@@ -907,8 +927,56 @@ fn strip_thinking_tags(content: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::path::PathBuf;
+
+    /// PR-032. A cancelled job must stop before starting another Ollama request,
+    /// not after the whole chunk's vision pass. The endpoint here is unroutable,
+    /// so if the check did NOT fire the call would fail with a Vision/HTTP error
+    /// instead -- which is exactly what distinguishes "cancelled early" from
+    /// "cancelled late" in this test.
+    #[tokio::test]
+    async fn test_describe_chunk_stops_at_batch_boundary_when_cancelled() {
+        let dir = std::env::temp_dir().join(format!("vtt032-vision-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut frames = Vec::new();
+        for i in 0..4 {
+            let p = dir.join(format!("f{i}.jpg"));
+            std::fs::write(&p, b"\xff\xd8\xff\xe0notarealjpeg").unwrap();
+            frames.push(FrameSample { path: p, timestamp: i as f64, scene_score: 0.0 });
+        }
+        let ollama = OllamaConfig {
+            endpoint: "http://127.0.0.1:1/api/chat".to_string(), // guaranteed unroutable
+            prompt_template_path: None, // no repo-relative file lookup in a unit test
+            default_prompt: "describe".to_string(),
+            ..Default::default()
+        };
+        let vision = VisionConfig { max_frames_per_request: 2, ..Default::default() };
+        let client = OllamaClient::new(&ollama, &vision).unwrap();
+        let chunk = Chunk { index: 0, start_seconds: 0.0, end_seconds: 10.0 };
+
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let err: VttError = client
+            .describe_chunk(&chunk, &frames, &[], &[], None, Some(&token))
+            .await
+            .expect_err("a cancelled job must not proceed");
+        assert!(
+            matches!(err, VttError::Cancelled),
+            "must stop at the batch boundary, not by failing the HTTP call: {err:?}"
+        );
+
+        // Without a token the same call reaches the network and fails differently,
+        // which proves the assertion above is testing the cancellation path.
+        let err: VttError = client
+            .describe_chunk(&chunk, &frames, &[], &[], None, None)
+            .await
+            .expect_err("unroutable endpoint");
+        assert!(!matches!(err, VttError::Cancelled), "got {err:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // --- Prompt template tests ---
 
@@ -1313,7 +1381,7 @@ mod tests {
         };
 
         let frames = vec![FrameSample { path: frame_path, timestamp: 0.0, scene_score: 0.0 }];
-        let segments = client.describe_chunk(&chunk, &frames, &[], &[], None).await.unwrap();
+        let segments = client.describe_chunk(&chunk, &frames, &[], &[], None, None).await.unwrap();
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].segment_type, SegmentType::Visual);
         assert!(!segments[0].content.is_empty());

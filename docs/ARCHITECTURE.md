@@ -290,6 +290,38 @@ been reported.
 (`ocr.json`) — against a candidates reference (raw wrapper output for uniformly spaced frames) or
 with a different tolerance — without touching the GPU; the sampling study is scored that way.
 
+## Job Submission and Profile Resolution
+
+The client never chooses configuration; it names a **profile** and the server resolves it. Which
+config a job actually ran under is therefore a property of the *submission path*, and that path had
+three silent failure modes until PR-032 — a job could run to completion under configuration nobody
+asked for, at ~108 minutes of GPU time per mistake.
+
+**Two submission paths, two encodings.** `POST /jobs` and `POST /jobs/url` take JSON, so every field
+arrives by name. `POST /jobs/upload` takes multipart, where fields arrive as an ordered stream —
+`file`, `force`, `profile`, in whatever order the client wrote them. **The server reads every field
+regardless of order** (`read_upload_fields`); it must not stop at the file part, because the shipped
+client appends its scalar fields *after* the file. The client also writes scalars first, so an older
+server still sees them. Both halves of that belt-and-braces exist because the one-sided version
+shipped once and silently discarded `--force` on every local upload.
+
+**Resolution and validation happen at submission, not at job start.** `resolve_config` loads the named
+profile, merges it over the base config, and validates the result before the job is queued. A profile
+that does not exist is a `400` naming the path searched; a profile carrying an unrunnable value — the
+deliberately-unset `vision.fps = 0.0` sentinel, for instance — is also a `400`, so a bad request reads
+as a bad request rather than as a processing failure later.
+
+**What ran is observable at submission.** The job response echoes the profile the server applied
+(absent means base config), and the client prints it. Before PR-032 the only record was the timeline's
+`capture` block, readable *after* the run — which is how two runs were spent on the wrong config on
+2026-08-25 before anyone noticed the frame counts.
+
+**Cancellation is bounded by a batch, not a chunk.** `DELETE /jobs/{id}` cancels a real token, checked
+between pipeline phases and, since PR-032, at the top of every vision batch inside `describe_chunk` —
+outside the per-batch retry loop, so a cancellation can never be mistaken for a failed attempt. The
+bound matters at high frame counts: a 360-frame chunk is 24 batches over ~13 minutes, and a cancelled
+job used to hold the GPU and block the queue for all of it.
+
 ## Key Abstractions
 
 | Abstraction | Description |
