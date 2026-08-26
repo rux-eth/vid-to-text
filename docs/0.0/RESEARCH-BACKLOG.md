@@ -200,11 +200,35 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   *axis range*. It also explains why the same segment's lines at 293.06B / 327.16B / 367.71B looked
   inconsistent with the stated range — the range was wrong, not the lines.
 
+  **Prevalence, measured 2026-08-26 over the 13 OCR'd jobs.** Parsing (instrument, timeframe,
+  exchange) from each frame's header — requiring a confidently-read exchange *and* instrument name, so
+  garbled reads are skipped — gives **41 of 119 segments (34%) spanning more than one chart**. Of
+  those, **13 change instrument** (e.g. Bitcoin/BITSTAMP -> Total Market Cap/CRYPTOCAP) and **28 change
+  only the timeframe** (e.g. 1h -> 4h), which for a trading corpus is an equally material claim. This
+  is a **lower bound**: it counts only segments with a readable header on at least two frames.
+
+  **It is a segmentation property, not a prompt property.** The same segment indices are affected
+  across every arm — `95f4bc52` (general), `48d04d48` (v1), `237ec3be` (v2), `2fc10c93` (v3),
+  `4fdf172c` (v3.1) all show the change at the same positions, because visual segments are cut per
+  request batch and a presenter switching charts mid-batch is invisible to that boundary. **No prompt
+  change alone can fix it**, though a prompt can make the model *report* the change.
+
+  **Two failure forms, both observed:**
+  - **Conflation** — `4fdf172c` seg 9 above: facts from three charts merged into one composite that
+    never existed.
+  - **Omission** — `4fdf172c` seg 4: the headers show Bitcoin/1W/BITSTAMP *and* Total Market
+    Cap/1D/CRYPTOCAP, and the description covers only the latter. The Bitcoin frames go unmentioned, so
+    the timeline silently loses content the video showed.
+
+  **A promising detail:** the model already narrates *some* inter-frame change unprompted — seg 4
+  contains "Between frames 1 and 2, the visible range shifts to focus on…". The capability exists; it
+  simply is not applied to instrument or timeframe changes.
+
   **Implications.** For a corpus meant to generate trading hypotheses, a timeline entry asserting a
-  chart state that never existed is worse than an omission. Candidate directions, none yet researched:
-  detect instrument changes between a segment's frames (the header text is OCR'd already, so a change
-  is cheaply detectable) and either split the segment or require the description to name the change;
-  and extend the prompt's header rules to cover the axis-range case. Needs its own PR.
+  chart state that never existed is worse than an omission — and here we have both. Candidate
+  directions, none yet researched: detect header changes between a segment's frames (already OCR'd, so
+  this is cheap) and either split the segment at the change or require the description to name it; and
+  extend the prompt's header rules to cover the axis-range case. Needs its own PR.
 
 - **The vision model reports axis GRIDLINES as drawn levels — a prompt-fixable accuracy defect, found
   2026-08-26 by inspecting the frame.** On `2025_05_26` segment 0, v3.1 listed ~23 "lines drawn at"
