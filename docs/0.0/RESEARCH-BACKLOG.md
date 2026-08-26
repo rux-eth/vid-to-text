@@ -168,6 +168,31 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   (`truncate_numeric_run`) for the consecutive-token form, and by **PR-028** for the templated and
   sub-threshold-verbatim forms.
 
+- **The vision model reports axis GRIDLINES as drawn levels — a prompt-fixable accuracy defect, found
+  2026-08-26 by inspecting the frame.** On `2025_05_26` segment 0, v3.1 listed ~23 "lines drawn at"
+  values. Checking the full-resolution frame (`ffmpeg -ss 25.5`, axis strip upscaled) shows the chart
+  distinguishes them cleanly and the model does not:
+  - **Real drawn levels carry a coloured price badge on the right axis**: 3.45 blue, 3.44 grey, 3.39
+    light-blue "TOTAL", 3.37 grey, 3.37 blue "Weekly Open", 3.33 pink "Dec Monthly open", 3.3 orange,
+    3.28 orange, 3.26 green, 3.18 yellow "Yearly Open" — ten levels, irregularly spaced, several
+    carrying the label that says what they are.
+  - **Gridlines carry a plain uncoloured label** at this chart's 0.02T interval: 3.48, 3.46, 3.42, 3.4,
+    3.34, 3.32, 3.24, 3.22, 3.2, 3.16.
+
+  The model's list mixes both, so gridline values (3.4, 3.34, 3.32, 3.24, 3.22, 3.2, 3.16) are stated
+  as levels the analyst drew. **The fidelity metric scores this as correct**, because gridline labels
+  are genuinely on screen and OCR reads them — so precision cannot see the error at all. For a corpus
+  meant to generate trading hypotheses the distinction is the whole point: "the analyst drew a level at
+  3.33T, labelled Dec Monthly open" is signal; "there is a gridline at 3.32T" is noise, and mixing them
+  inflates the level count and buries the real ones.
+
+  **Candidate fix is a prompt rule, not a guard**: a drawn level has a coloured badge and often a text
+  label; a gridline has a plain label at a regular interval — report the former, ignore the latter.
+  Cheap to state and directly checkable by reading output. Needs its own PR (a v3.2 prompt), **not** a
+  reopening of PR-030, whose decision between the four measured arms stands. Note the process caveat:
+  this was found only after three *wrong* fabrication accusations about the same segment were corrected
+  by inspecting the frame — see the `verify frames before claiming fabrication` rule.
+
 - **Vision degenerates in at least two further modes that no shipped guard covers.** Both found in a
   single live job on 2026-08-25 (`046cd326-5473-4c74-ae17-56afed903b2e`, `2024_6_24_5-20.mp4`,
   `market-research`, prompt v3.1 `cfab896e`) immediately after PR-028 was deployed — i.e. at the
