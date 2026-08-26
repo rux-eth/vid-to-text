@@ -1340,11 +1340,15 @@ worst segment falls to 64 stated / 3 unsupported.
 **That defect is now PR-028**, because neither shipped guard can see it: `truncate_numeric_run` counts
 a longest consecutive run of 2, and `truncate_repetition` sees only unique sentences.
 
-**Shipping decision is OPEN.** `prompts/vision-chart.txt` currently holds **v3.1**, validated on one
-clip. **v2 is the only version measured on all three**, including held-out. v3.1 is terser (200 vs 278
-w/seg) with higher recall (0.265 vs 0.235) and slightly lower precision (0.890 vs 0.926) on the clip
-both saw. Completing v3.1 on `2024_6_24` and `2025_05_26` is the outstanding task; if it does not hold,
-revert to v2 (`a4a133fc`) which is recorded and reproducible.
+**Shipping decision is CLOSED — v3.1 (`cfab896e`) kept. Decided 2026-08-26 in
+[PR-030](PR-030-close-vision-prompt-shipping-decision.md);** see that PR for the completed table and
+the basis. In short: the table was finished by running v3.1 on the held-out `2025_05_26`, where it
+beats both v2 and the general prompt on precision *and* recall at once (.935/.336 vs .923/.286 and
+.903/.204), so the trade that made this a judgement call on the tuning clips does not arise on the
+held-out clip. No accuracy claim is made — the decision rests on the precision/recall trade, on reading
+the output, and on PR-029's yield-concentration guardrail, not on ranking arms by F0.5. Two risks are
+carried: v3.1 degenerates on `2024_6_24` (concentration 10.17, clip-conditional — it is 1.00 and 0.96
+on the other two), and the cursor-chronology fabrication this PR declined to detect is still present.
 
 **Verdict against the PR's own bar:** boilerplate is measurably down as a rate, the worst known
 failure is addressed and verified by reading, nothing collapsed on the guardrail, and no accuracy

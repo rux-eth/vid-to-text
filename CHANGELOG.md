@@ -69,6 +69,12 @@ All notable user-facing changes to vid-to-text. Format: [Keep a Changelog 1.1.0]
   circled-glyph slot (`①②③`) that ASCII masking cannot see. Thresholds measured over 11,108 visual
   segments: legitimate repeats top out at 13, degenerate ones are 143 and above. (PR-028)
 
+### Changed
+- The chart/screencast vision prompt decision is closed: **v3.1 (`cfab896e`) is kept** as the
+  `market-research` default. Completed on the held-out clip, where it states more checkable content
+  than the alternatives at higher precision and higher recall simultaneously. No file change — it was
+  already the deployed prompt. No accuracy claim is made between prompts. (PR-030)
+
 ### Fixed
 - `--profile` now applies to local files and directories, not only to `--url`. It was accepted by the
   CLI and never sent: the upload path had no profile parameter at all, so every local job silently ran

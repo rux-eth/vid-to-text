@@ -22,7 +22,166 @@ Skipping the PR research procedure is a hard violation of the research-backed-de
 
 ## Research findings
 
-_To be populated by `PROCEDURE-pr-research.md`._
+### State Assessment (2026-08-26)
+
+**Both dependencies landed today, hours before this assessment.** PR-029 (`8cc4b11`, `d79aaad`) changed
+what the metric reports; PR-032 (`04455a4`) fixed the submission path this PR's one remaining run
+depends on. Neither is deployed.
+
+**Current state:**
+
+- **The running server predates both.** `vtt-server` is up on the desktop (pid 907228) from a binary
+  built **Aug 25 21:33** — before PR-029 and PR-032 were committed. A run submitted now would produce
+  no `signature` and no `yield_concentration`, and would still silently ignore `--profile` for a local
+  file. **Deploying is a precondition for the remaining run**, and PR-032 exists precisely so this run
+  is submitted correctly.
+- **Config back-compat verified, not assumed.** `FidelityConfig` carries `#[serde(default)]`
+  (`vtt-core/src/config.rs:222`), so PR-029's new `min_facts_for_yield` key defaults cleanly and the
+  deployed `server.toml` — which sets only `enabled = true` under `[fidelity]` — parses unchanged.
+- **The prompt under test is already deployed.** `~/vid-to-text/prompts/vision-chart.txt` on the
+  desktop hashes to `cfab896e…` — v3.1, the arm being completed. No prompt deploy needed.
+- **The clip is staged.** `/home/rux/vtt-exp/study/2025_05_26_5-20.mp4`, 113.8 MB.
+- **The GPU is idle.** `nvidia-smi` reports 0% utilisation and 460 MiB used; `ollama ps` shows no
+  loaded model; no job is in flight. Deploying now interrupts nothing.
+- **All 11 arms have been re-scored under one signed metric** (offline, no GPU), satisfying this PR's
+  first verification criterion ahead of the run. Signature:
+  `vtt-fidelity|v:1|ref:kept|tol:0|persist:5|height:10|stop:19-6ff508cb79a3821a`.
+
+**The completed comparison, on one metric version** — F0.5 / precision / recall / `stated` / kchars /
+**yield concentration** (PR-029's guardrail; ~1.0 is unremarkable, high means the text is piled into
+segments that state almost nothing):
+
+| prompt | `2024_4_8` | `2024_6_24` | `2025_05_26` |
+|---|---|---|---|
+| general `c0fe5d36` | .516 / .883 / .194 / 111 / 32.5k / **0.85** | .659 / .950 / .296 / 240 / 41.5k / **1.14** | .536 / .903 / .204 / 226 / 42.5k / **1.00** |
+| v1 `923b869a` | .488 / .893 / .174 / 159 / 12.7k / **1.06** | .530 / .885 / .203 / 218 / 18.5k / **0.94** | — |
+| v2 `a4a133fc` | .584 / .926 / .235 / 285 / 13.1k / **1.00** | .663 / .906 / .320 / 310 / 38.4k / **2.37** | .638 / .923 / .286 / 310 / 18.4k / **1.06** |
+| v3 `c0921846` | .472 / .529 / .330 / 556 / 24.9k / **0.87** | — | — |
+| **v3.1 `cfab896e`** | .604 / .890 / .265 / 291 / 9.5k / **1.00** | .668 / .863 / .351 / 386 / 43.4k / **10.17** | **MISSING** |
+
+**New constraints / evidence PR-029 introduced, which the PR was drafted before seeing:**
+
+1. **v3.1's best F0.5 cell is also its worst guardrail reading, by an order of magnitude.** On
+   `2024_6_24`, v3.1 scores concentration **10.17** against v2's **2.37** and the general prompt's
+   **1.14** on the same clip, at the same sampling. Its recall lead there (.351 vs .320) was bought
+   with text that the metric can price only as bulk. This is exactly the reading PR-029 was built to
+   supply, and it did not exist when this PR's Motivation was written.
+2. **The effect is clip-conditional, not a blanket property of v3.1.** On `2024_4_8` both v2 and v3.1
+   sit at **1.00**. So the honest statement is "v3.1 degenerated on `2024_6_24`", not "v3.1
+   degenerates" — and a single further clip cannot settle which, since `2025_05_26` will be one
+   observation.
+3. **The missing cell is now decision-relevant in a way the F0.5 column alone is not.** Whether v3.1's
+   concentration on `2025_05_26` looks like its 1.00 on `2024_4_8` or its 10.17 on `2024_6_24` bears
+   directly on the trade this PR must judge.
+
+**Stale assumptions:** none of substance. The PR was already amended today (ranking dropped, table
+rebuilt with fact counts and lengths, `vtt-client` binary name corrected); this assessment confirms
+those amendments still hold and adds the guardrail column, which did not exist when they were made.
+
+**Downstream contracts:** **none** — `grep -rn "PR-030"` returns only `PR-032`'s dependency note,
+`ROADMAP.md` and `RESEARCH-BACKLOG.md` index rows. Upstream: PR-029 `[x]`, PR-032 `[x]`, PR-026 `[x]`,
+all landed.
+
+**Path-tier checkpoint:** **Tier-1 confirmed** (PR header, `ROADMAP.md:87`, `RESEARCH-BACKLOG.md:71`
+agree). Phase 1 found no premise change and no unsatisfiable contract. **Cleared after Phase 1**;
+Phases 2-4 do not run.
+
+**Blocking on an operator decision, not on research.** The remaining work is a **GPU run on the shared
+desktop**, which requires first **deploying PR-029 + PR-032** and restarting the running server. Both
+are outward-facing actions on a machine the user owns, so they are not taken unasked. Everything
+offline is already done.
+
+
+### The Missing Arm, and the Decision (2026-08-26)
+
+**Run.** Job `4fdf172c`, `2025_05_26_5-20.mp4`, `market-research`, 506.4s over 6 chunks. Submitted
+through the CLI path PR-032 repaired — the client reported `(profile: market-research)` and the first
+`[ocr] chunk_0` line reported **20 frames**, confirming adaptive sampling actually applied where fixed
+mode would have shown 360. `capture` records prompt `cfab896e` (v3.1), `sampling: adaptive`,
+`use_transcript: false`, `transcript_window: causal` — fully paired with every other arm.
+
+**The completed comparison.** F0.5 / precision / recall / **yield concentration**, all arms under one
+signature (`vtt-fidelity|v:1|ref:kept|tol:0|persist:5|height:10|stop:19-6ff508cb79a3821a`):
+
+| prompt | `2024_4_8` | `2024_6_24` | `2025_05_26` (held out) |
+|---|---|---|---|
+| general `c0fe5d36` | .516 / .883 / .194 / 0.85 | .659 / **.950** / .296 / 1.14 | .536 / .903 / .204 / 1.00 |
+| v1 `923b869a` | .488 / .893 / .174 / 1.06 | .530 / .885 / .203 / 0.94 | — |
+| v2 `a4a133fc` | .584 / .926 / .235 / 1.00 | .663 / .906 / .320 / **2.37** | .638 / .923 / .286 / 1.06 |
+| v3 `c0921846` | .472 / .529 / .330 / 0.87 | — | — |
+| **v3.1 `cfab896e`** | .604 / .890 / .265 / 1.00 | .668 / .863 / .351 / **10.17** | **.689 / .935 / .336 / 0.96** |
+
+**The concentration figure answers the question Phase 1 raised.** v3.1's 10.17 on `2024_6_24` is
+**clip-conditional, not a property of the prompt**: on `2024_4_8` it scores 1.00 and on the held-out
+clip 0.96. v2 degrades on the same clip too (2.37), just less. `2024_6_24` is hard for both.
+
+**Reading the output — the primary evidence, not a supplement.** Same segment window
+(`00:04:51–00:06:00`) on the held-out clip:
+
+- **v3.1, 1,051 chars:** axis span 3.39T–3.65T, x-axis March 2024–May 2026, the OHLC header
+  `O3.37T H3.42T L3.36T C3.39T (+0.53%)`, a drawn line at 3.39T, a shaded band 3.39T–3.45T, an
+  oscillator reading 67, and the Elliott Wave overlay labels.
+- **v2, 292 chars:** approximate axis range, two labelled horizontal lines.
+
+v3.1 states roughly **3.6x the content on the same window, at higher precision** (.935 vs .923). Its
+ten segments run 966–1,697 chars with 34–88 chars per fact — no bloat anywhere, and per-segment
+precision is 0.750–1.000 with seven segments above 0.9.
+
+**What is still wrong with v3.1, recorded rather than smoothed over.** The cursor-chronology
+fabrication PR-026 named and chose not to build a detector for is **still present**: "The presenter
+scrolls the chart" appears **12 times** in 12,939 characters, and the narration is sometimes
+self-contradictory — scrolling "to the right" while the cursor moves from February 2025 *back* to
+August 2024, then forward again. This content is unverifiable by construction (it is Trend/Magnitude
+in CHOCOLATE terms, which PR-023 excluded) so it costs nothing in precision and nothing in the
+guardrail at this volume. It is a real defect that no instrument in this project can currently price.
+
+---
+
+**DECISION: keep v3.1 (`cfab896e`). No file change — `prompts/vision-chart.txt` already holds it.**
+
+**Basis, stated as the amended scope requires — not read off the F0.5 column:**
+
+1. **On the held-out clip there is no trade to adjudicate.** v3.1 beats both alternatives on
+   precision *and* recall simultaneously (.935/.336 against v2's .923/.286 and general's .903/.204).
+   The precision-versus-recall tension that made this a judgement call on the tuning clips does not
+   arise on the clip that was held out.
+2. **The recorded caution about the general prompt does not survive the held-out clip.** Its precision
+   lead is real on `2024_6_24` (.950 vs .863) and is the reason this decision was not to be read off a
+   score column — but on `2025_05_26` v3.1 is ahead on both axes, and general's recall is 0.204
+   against 0.336, which for a research corpus is a large amount of on-screen fact left unmentioned.
+3. **The guardrail supports keeping it, with one flagged exception.** Two of three clips are clean
+   (1.00, 0.96). The `2024_6_24` cell is genuinely bad and is now *visible*, which it was not when this
+   PR was drafted. PR-031 targets that mode directly.
+4. **Reverting to v2 is not actually available.** Its prompt file was never committed
+   (`prs/PR-030` § Notes); "revert to v2" would mean reconstructing it from a hash. Given v3.1 is ahead
+   on the held-out clip, that cost buys nothing.
+
+**No accuracy claim is made.** No arm is asserted to be more accurate than another; `docs/ARCHITECTURE.md`
+§ Review's rule stands, and κ remains unreported.
+
+**Risks accepted:**
+- v3.1 degenerates on `2024_6_24` (concentration 10.17) and nothing guards that mode until PR-031.
+- The cursor-chronology fabrication persists, unpriced by any instrument here.
+- The held-out clip is **one** clip. This decision rests on three clips total, two of them tuning.
+
+
+### Gate Check (2026-08-26)
+
+- Premise still valid: ✓ — the decision was open and is now closed with the table completed
+- No prerequisite PRs surfaced: ✓ (PR-029 and PR-032 both landed today and were deployed for this run)
+- Verification criteria:
+  - [x] v3.1 measured on `2025_05_26_5-20.mp4` at the same sampling as every other arm — `capture`
+        confirms prompt `cfab896e`, adaptive, `use_transcript: false`, causal
+  - [x] All arms scored under a single, named metric version, reported as a guardrail
+  - [x] The decision is recorded with its basis, including the precision/recall trade, the general
+        prompt's precision lead on `2024_6_24`, and what reading the output showed
+  - [x] `prompts/vision-chart.txt` and the `market-research` profile reflect the decision — v3.1 was
+        already deployed and stays; **no file change**
+  - [x] PR-026's "Shipping decision is OPEN" section is closed and points here
+  - [x] `cargo test --workspace` passes
+  - [x] No claim of the form "prompt B is more accurate than prompt A" appears in this PR's output;
+        fact count and text volume are reported beside every figure
+- Implementation cleared / PR complete: ✓ (2026-08-26)
 
 ---
 
