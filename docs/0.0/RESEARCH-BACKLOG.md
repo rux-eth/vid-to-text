@@ -168,6 +168,37 @@ Per the time-decay policy in `PROCEDURE-pr-research.md`, any PR marked `fully-re
   (`truncate_numeric_run`) for the consecutive-token form, and by **PR-028** for the templated and
   sub-threshold-verbatim forms.
 
+- **CORPUS CAPTURE COMPLETE — 68/68, zero failures (2026-08-26 → 2026-08-28).** Captured under the
+  `market-research` profile; audited on completion rather than trusted from the runner's counter.
+  - **41.3 h** of video → **19,420 speech segments** (1.69 M chars) and **1,230 visual segments**
+    (2.39 M chars).
+  - **Provenance is uniform across all 68**: prompt `cfab896e` (v3.1), `adaptive` sampling,
+    `use_transcript: false`, `causal` window, and one fidelity signature —
+    `vtt-fidelity|v:1|ref:kept|tol:0|persist:5|height:10|stop:19-6ff508cb79a3821a`. Every figure in
+    this corpus is provably comparable to every other, which is what PR-029's signature was built for.
+  - **No anomalies**: zero videos with no speech, zero with no visual, zero missing fidelity blocks.
+  - **Speech track (the data) is healthy**: 334,824 words at **135 wpm**, **0.79%** uncovered time
+    across 41.3 h (worst single video 2.4%), and **one** Whisper repetition loop in the whole corpus —
+    `2024_4_1` at 20:19, "six and a half six six six … x16". Self-announcing, so it sits in the
+    acceptable bucket of the capture bar.
+  - **Visual track** matches what the PR-030 arms predicted, so nothing drifted at corpus scale:
+    precision min 0.487 / median **0.854** / max 0.961; recall median 0.242; F0.5 median 0.558.
+  - **The yield-concentration guardrail earned its keep.** Median 1.11, and it flags **4 of 68** above
+    2.0: `2024_8_19` **7.69**, `2024_7_15` 4.61, `2026_02_04` 3.41, `2025_10_21` 2.18. Under the
+    pre-PR-029 metric these were invisible. Note `2026_02_04` is the episode containing the Velo
+    dashboard the prompt does not describe — the guardrail found it without being told, which is the
+    first independent evidence that it detects something real rather than fitting its two examples.
+  - **Those four videos are the short list** worth reading first if the visual track is ever used for
+    anything load-bearing.
+
+- **Runner defect fixed outside the repo, 2026-08-27.** `~/Documents/seer_archive/bin/run-corpus.sh`
+  treated a reachable server answering `{"error":"job not found"}` as "server unreachable" and retried
+  forever. Job state is in-memory, so every server restart drops queued and running jobs — the run
+  stalled twice this way (3 h and 0.5 h of idle GPU). The poll loop now detects that response, records
+  the video as lost and moves on; it stays pending in the cache and is redone on a later pass. Backup
+  at `run-corpus.sh.bak-20260827-232344`. **Still outside version control** — see
+  [[corpus-tooling-outside-repo]].
+
 - **Corpus composition, checked by frame inspection 2026-08-26 — the corpus is homogeneous in genre
   but NOT in interface, and the prompt is tuned for only one of the interfaces.** 68 videos, **41.2
   hours**, one weekly market-analysis series. Frames sampled at 2023-10-02 t=30 and t=700, 2025-10-06
